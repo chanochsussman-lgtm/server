@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from music_assistant_models.enums import MediaType, ProviderFeature
+from music_assistant_models.enums import EventType, MediaType, ProviderFeature
 from music_assistant_models.media_items import ProviderMapping, Radio, Track
 
 from music_assistant.constants import DB_TABLE_RADIOS
@@ -38,6 +38,40 @@ class RadioController(MediaControllerBase[Radio]):
         # register (extra) api handlers
         api_base = self.api_base
         self.mass.register_api_command(f"music/{api_base}/radio_versions", self.versions)
+
+    async def remove_item_from_library(self, item_id: str | int, recursive: bool = True) -> None:
+        """Remove a radio station from the library.
+
+        For stations with catalog provider mappings, the DB record is kept
+        (with in_library=False) so the station remains browsable.
+        """
+        db_id = int(item_id)
+        library_item = await self.get_library_item(db_id)
+        assert library_item, f"Item does not exist: {db_id}"
+        # check if any provider mapping belongs to a catalog radio provider
+        has_catalog_mapping = False
+        for prov_map in library_item.provider_mappings:
+            provider = self.mass.get_provider(prov_map.provider_instance)
+            if (
+                provider
+                and isinstance(provider, MusicProvider)
+                and not provider.library_radios_user_curated
+            ):
+                has_catalog_mapping = True
+                break
+        if has_catalog_mapping:
+            # keep the DB record but mark all mappings as not in library
+            for prov_map in library_item.provider_mappings:
+                prov_map.in_library = False
+            await self.set_provider_mappings(db_id, library_item.provider_mappings)
+            await self.set_favorite(db_id, False)
+            self.mass.signal_event(EventType.MEDIA_ITEM_UPDATED, library_item.uri, library_item)
+            self.logger.debug(
+                "removed item %s from library (kept in database for catalog browse)", db_id
+            )
+            return
+        # no catalog provider mappings: fall back to full deletion
+        await super().remove_item_from_library(db_id, recursive)
 
     async def versions(
         self,

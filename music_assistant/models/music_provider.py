@@ -536,7 +536,14 @@ class MusicProvider(Provider):
             # library items not (yet) synced, fallback to direct retrieval
             return [x async for x in self.get_library_tracks()]
         if subpath == "radios":
-            if radios := await self.mass.music.radio.library_items(
+            if not self.library_radios_user_curated:
+                # catalog provider: show all stations from DB (including not-in-library)
+                if radios := await self.mass.music.radio.get_library_items_by_query(
+                    provider_filter=[self.instance_id],
+                    in_library_only=False,
+                ):
+                    return radios
+            elif radios := await self.mass.music.radio.library_items(
                 provider=self.instance_id,
             ):
                 return radios
@@ -735,6 +742,21 @@ class MusicProvider(Provider):
                         except MediaNotFoundError:
                             # edge case: the item is (already) removed from MA library as well
                             continue
+                        # for catalog radio providers, clean up items that were never
+                        # in the user's library (stations removed from catalog)
+                        if media_type == MediaType.RADIO and not self.library_radios_user_curated:
+                            this_mapping = next(
+                                (
+                                    x
+                                    for x in library_item.provider_mappings
+                                    if x.provider_instance == self.instance_id
+                                ),
+                                None,
+                            )
+                            if this_mapping and not this_mapping.in_library:
+                                await controller.remove_provider_mappings(db_id, self.instance_id)
+                                await asyncio.sleep(0)
+                                continue
                         # check if we have other provider-mappings (marked as in-library)
                         remaining_providers_in_library = {
                             x.provider_instance
@@ -1191,13 +1213,13 @@ class MusicProvider(Provider):
             library_item = await self.mass.music.radio.get_library_item_by_prov_mappings(
                 prov_item.provider_mappings,
             )
-            if not library_item and not self.library_radios_user_curated:
-                # catalog-style provider: skip auto-add, only update existing items
-                continue
             try:
                 if not library_item:
+                    # For catalog providers, add all stations to DB but not to library.
+                    # For user-curated providers, add directly to library.
+                    in_library = self.library_radios_user_curated
                     for prov_map in prov_item.provider_mappings:
-                        prov_map.in_library = True
+                        prov_map.in_library = in_library
                     library_item = await self.mass.music.radio.add_item_to_library(prov_item)
                 elif not self._check_provider_mappings(library_item, prov_item, True):
                     # existing library item but provider mapping doesn't match

@@ -243,10 +243,16 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
 
     async def library_count(self, favorite_only: bool = False) -> int:
         """Return the total number of items in the library."""
-        if favorite_only:
-            sql_query = f"SELECT item_id FROM {self.db_table} WHERE favorite = 1"
-            return await self.mass.music.database.get_count_from_query(sql_query)
-        return await self.mass.music.database.get_count(self.db_table)
+        favorite_clause = f"AND {self.db_table}.favorite = 1 " if favorite_only else ""
+        sql_query = (
+            f"SELECT DISTINCT {self.db_table}.item_id FROM {self.db_table} "
+            f"JOIN {DB_TABLE_PROVIDER_MAPPINGS} "
+            f"ON {DB_TABLE_PROVIDER_MAPPINGS}.item_id = {self.db_table}.item_id "
+            f"AND {DB_TABLE_PROVIDER_MAPPINGS}.media_type = '{self.media_type.value}' "
+            f"AND {DB_TABLE_PROVIDER_MAPPINGS}.in_library = 1 "
+            f"WHERE 1=1 {favorite_clause}"
+        )
+        return await self.mass.music.database.get_count_from_query(sql_query)
 
     async def library_items(
         self,
