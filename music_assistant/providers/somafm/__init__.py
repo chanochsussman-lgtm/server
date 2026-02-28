@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     from music_assistant.models import ProviderInstanceType
 
 SUPPORTED_FEATURES = {
-    ProviderFeature.LIBRARY_RADIOS,
     ProviderFeature.BROWSE,
 }
 
@@ -83,11 +82,6 @@ class SomaFMProvider(MusicProvider):
     def is_streaming_provider(self) -> bool:
         """Return True if the provider is a streaming provider."""
         return True
-
-    @property
-    def library_radios_user_curated(self) -> bool:
-        """All SomaFM channels are returned, not user-curated selections."""
-        return False
 
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
         """Retrieve library/subscribed radio stations from the provider."""
