@@ -86,7 +86,7 @@ class SomaFMProvider(MusicProvider):
 
     @property
     def library_radios_user_curated(self) -> bool:
-        """All SomaFM channels are returned, not user-curated selections."""
+        """SomaFM returns its full channel catalog."""
         return False
 
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:

@@ -202,7 +202,7 @@ class RadiothekProvider(MusicProvider):
 
     @property
     def library_radios_user_curated(self) -> bool:
-        """All ORF stations are returned, not user-curated selections."""
+        """ORF Radiothek returns its full station catalog."""
         return False
 
     async def handle_async_init(self) -> None:

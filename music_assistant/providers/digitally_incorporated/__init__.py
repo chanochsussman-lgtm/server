@@ -223,7 +223,7 @@ class DigitallyIncorporatedProvider(MusicProvider):
 
     @property
     def library_radios_user_curated(self) -> bool:
-        """All DI channels are returned, not user-curated selections."""
+        """Digitally Incorporated returns its full channel catalog."""
         return False
 
     async def search(
