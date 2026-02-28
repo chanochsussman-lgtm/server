@@ -66,6 +66,20 @@ class MusicProvider(Provider):
         """
         return True
 
+    @property
+    def library_radios_user_curated(self) -> bool:
+        """Return True if get_library_radios() returns user-curated stations.
+
+        When True (default), radio stations from this provider are automatically
+        added to the MA library during sync because they represent deliberate
+        user selections (e.g. TuneIn presets, Pandora stations).
+
+        Override to False for providers whose get_library_radios() returns all
+        available stations rather than user-curated ones (e.g. SomaFM, Radio Paradise).
+        Those stations are available for browsing and can be added manually.
+        """
+        return True
+
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
 
@@ -1181,9 +1195,13 @@ class MusicProvider(Provider):
             library_item = await self.mass.music.radio.get_library_item_by_prov_mappings(
                 prov_item.provider_mappings,
             )
+            if not library_item and not self.library_radios_user_curated:
+                # non-user-curated providers (e.g. SomaFM) don't auto-add,
+                # users can browse and add stations manually
+                continue
             try:
                 if not library_item:
-                    # add item to the library
+                    # user-curated provider: auto-add to library
                     for prov_map in prov_item.provider_mappings:
                         prov_map.in_library = True
                     library_item = await self.mass.music.radio.add_item_to_library(prov_item)
