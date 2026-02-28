@@ -84,6 +84,11 @@ class SomaFMProvider(MusicProvider):
         """Return True if the provider is a streaming provider."""
         return True
 
+    @property
+    def library_radios_user_curated(self) -> bool:
+        """All SomaFM channels are returned, not user-curated selections."""
+        return False
+
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
         """Retrieve library/subscribed radio stations from the provider."""
         stations = await self._get_stations()  # May be cached

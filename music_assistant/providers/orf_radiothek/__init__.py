@@ -200,6 +200,11 @@ class RadiothekProvider(MusicProvider):
         """Return True for streaming providers."""
         return True
 
+    @property
+    def library_radios_user_curated(self) -> bool:
+        """All ORF stations are returned, not user-curated selections."""
+        return False
+
     async def handle_async_init(self) -> None:
         """Load config and prime caches."""
         self.stream_proto = str(self.config.get_value(CONF_STREAM_PROTO) or "hls").lower()

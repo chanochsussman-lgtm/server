@@ -33,6 +33,11 @@ class RadioParadiseProvider(MusicProvider):
         """Return True if the provider is a streaming provider."""
         return True
 
+    @property
+    def library_radios_user_curated(self) -> bool:
+        """All Radio Paradise channels are returned, not user-curated selections."""
+        return False
+
     async def get_library_radios(self) -> AsyncGenerator[Radio, None]:
         """Retrieve library/subscribed radio stations from the provider."""
         for channel_id in RADIO_PARADISE_CHANNELS:
