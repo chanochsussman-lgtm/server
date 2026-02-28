@@ -1181,13 +1181,12 @@ class MusicProvider(Provider):
             library_item = await self.mass.music.radio.get_library_item_by_prov_mappings(
                 prov_item.provider_mappings,
             )
+            if not library_item:
+                # radio stations are not auto-added to the library during sync,
+                # users can browse and add stations manually
+                continue
             try:
-                if not library_item:
-                    # add item to the library
-                    for prov_map in prov_item.provider_mappings:
-                        prov_map.in_library = True
-                    library_item = await self.mass.music.radio.add_item_to_library(prov_item)
-                elif not self._check_provider_mappings(library_item, prov_item, True):
+                if not self._check_provider_mappings(library_item, prov_item, True):
                     # existing library item but provider mapping doesn't match
                     library_item = await self.mass.music.radio.update_item_in_library(
                         library_item.item_id, prov_item
