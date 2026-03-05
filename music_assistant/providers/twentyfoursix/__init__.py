@@ -599,23 +599,22 @@ class TwentyFourSixProvider(MusicProvider):
 
 
     async def get_stream_details(self, item_id: str, media_item=None) -> StreamDetails:
-        """Return stream details. URL is constructed locally per TfsMediaSource APK bytecode.
+        """Return stream details. Resolves the 302 redirect from the play endpoint
+        to get the pre-signed Cloudflare R2 URL for direct streaming.
 
-        The APK builds the URL as:
-          https://24six.app/api/v3/content/{id}/play?format={audio_format}
-        Auth is the standard Bearer token in the request header.
-
-        We fetch the content metadata first to get the audio_format field
-        ("m4a", "ogg", "m3u8"), then construct the URL and set the correct MIME type.
+        Tries multiple endpoints to determine audio format:
+        1. POST /api/v3/music/content/{id} - returns audio_format field
+        2. GET /api/v3/content/{id} - fallback
+        3. Default to m4a (AAC in M4A container - most common on 24Six)
         """
+        import json as _js
         self.logger.info("24Six: get_stream_details called for item_id=%s", item_id)
 
-        # Fetch content metadata to determine audio_format
-        import json as _js
         audio_fmt = "m4a"
         content_type = ContentType.AAC
         stream_type = StreamType.HTTP
 
+        # Try POST content endpoint first
         try:
             session = await self._get_session()
             async with session.post(
@@ -624,14 +623,35 @@ class TwentyFourSixProvider(MusicProvider):
                 headers=self._auth_headers(),
             ) as resp:
                 body = await resp.text()
+                self.logger.info("24Six: content metadata status=%s", resp.status)
                 if resp.status == 200:
                     data = _js.loads(body) if body else {}
                     raw_fmt = data.get("audio_format", "m4a")
-                    if isinstance(raw_fmt, str):
+                    if isinstance(raw_fmt, str) and raw_fmt:
                         audio_fmt = raw_fmt.lower()
-                    self.logger.info("24Six: content metadata audio_format=%r", audio_fmt)
+                    self.logger.info("24Six: content metadata audio_format=%r bitrate=%r",
+                                     audio_fmt, data.get("bitrate"))
         except Exception as exc:
             self.logger.warning("24Six: failed to fetch content metadata: %s", exc)
+
+        # Try GET content endpoint as fallback if still defaulting
+        if audio_fmt == "m4a":
+            try:
+                session = await self._get_session()
+                async with session.get(
+                    f"{BASE_URL}/api/v3/content/{item_id}",
+                    headers=self._auth_headers(),
+                ) as resp:
+                    if resp.status == 200:
+                        body = await resp.text()
+                        data = _js.loads(body) if body else {}
+                        raw_fmt = (data.get("audio_format")
+                                   or data.get("content", {}).get("audio_format", "m4a"))
+                        if isinstance(raw_fmt, str) and raw_fmt:
+                            audio_fmt = raw_fmt.lower()
+                        self.logger.info("24Six: GET content fallback audio_format=%r", audio_fmt)
+            except Exception as exc:
+                self.logger.warning("24Six: GET content fallback failed: %s", exc)
 
         # Map audio_format string → ContentType
         if audio_fmt == "m3u8":
@@ -640,7 +660,7 @@ class TwentyFourSixProvider(MusicProvider):
         elif audio_fmt == "ogg":
             content_type = ContentType.OGG
         else:
-            content_type = ContentType.AAC  # covers m4a and anything else
+            content_type = ContentType.AAC  # m4a/aac - most common
 
         try:
             stream_url = await self._begin_stream(item_id, audio_fmt)
@@ -750,18 +770,28 @@ class TwentyFourSixProvider(MusicProvider):
                 or "Unknown"
             )
             raw_artists = [{"id": data["artist_id"], "name": artist_name}]
+        # Filter artists - use id or artist_id field
+        artist_mappings = []
+        for a in raw_artists:
+            aid = a.get("id") or a.get("artist_id")
+            if aid:
+                artist_mappings.append(ItemMapping(
+                    item_id=str(aid),
+                    provider=self.instance_id,
+                    name=a.get("name") or a.get("artist_name", ""),
+                ))
+        # Last resort: use track's own artist_id
+        if not artist_mappings and data.get("artist_id"):
+            artist_mappings.append(ItemMapping(
+                item_id=str(data["artist_id"]),
+                provider=self.instance_id,
+                name=(data.get("subtitle") or "").split("•")[0].strip() or "Unknown",
+            ))
         track = Track(
             item_id=track_id,
             provider=self.instance_id,
             name=data.get("title") or "Unknown Track",
-            artists=[
-                ItemMapping(
-                    item_id=str(a["id"]),
-                    provider=self.instance_id,
-                    name=a.get("name", ""),
-                )
-                for a in raw_artists if a.get("id")
-            ],
+            artists=artist_mappings,
             album=(
                 ItemMapping(
                     item_id=str(collection.get("id") or data.get("collection_id", "")),
