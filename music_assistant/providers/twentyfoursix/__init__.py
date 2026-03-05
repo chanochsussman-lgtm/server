@@ -188,14 +188,11 @@ class TwentyFourSixProvider(MusicProvider):
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
     async def _select_profile(self) -> None:
-        """After login, select profile by POSTing to /app/profile/{permission_id}.
-        
-        The profiles list is obtained via POST /app/music/search/quick with empty query,
-        which returns the list before a profile is selected.
-        """
+        """Select profile by first calling pin-check then profile, matching the app's login flow."""
         session = await self._get_session()
         xsrf = self._xsrf_header(session)
         try:
+            # Step 1: Get profiles list
             async with session.post(
                 f"{BASE_URL}/app/music/search/quick",
                 json={"q": ""},
@@ -207,41 +204,37 @@ class TwentyFourSixProvider(MusicProvider):
                 self.logger.warning("24Six: could not retrieve profiles list")
                 return
 
-            # Log all profiles for debugging
-            for p in profiles:
-                self.logger.info(
-                    "24Six: found profile id=%s permission_id=%s name=%s dob=%s",
-                    p.get("id"), p.get("permission_id"), p.get("name"), p.get("date_of_birth")
-                )
-
-            # Find chanoch yosef — the adult account (no date_of_birth)
+            # Find chanoch yosef profile
             chosen = None
             for p in profiles:
-                name = (p.get("name") or "").strip().lower()
-                if "chanoch" in name:
+                if "chanoch" in (p.get("name") or "").strip().lower():
                     chosen = p
                     break
             if not chosen:
-                for p in profiles:
-                    if not p.get("date_of_birth"):
-                        chosen = p
-                        break
-            if not chosen:
                 chosen = profiles[0]
 
-            profile_name = chosen.get("name", "unknown")
-            permission_id = chosen.get("permission_id")
-
             profile_id = chosen.get("permission_id") or chosen.get("id")
+            profile_name = chosen.get("name", "unknown")
             self.logger.info("24Six: selecting profile '%s' (id=%s)", profile_name, profile_id)
+
+            # Step 2: pin-check (establishes session cookies for this profile)
+            xsrf = self._xsrf_header(session)
+            async with session.post(
+                f"{BASE_URL}/app/pin-check",
+                json={"profile_id": profile_id},
+                headers=xsrf,
+            ) as resp:
+                self.logger.info("24Six: pin-check status=%s", resp.status)
+
+            # Step 3: profile selection (finalizes profile)
             xsrf = self._xsrf_header(session)
             async with session.post(
                 f"{BASE_URL}/app/profile",
-                json={"profile": profile_id, "pin": None},
+                json={"profile_id": profile_id},
                 headers=xsrf,
             ) as resp:
                 body = await resp.text()
-                self.logger.info("24Six: profile selection status=%s body=%s", resp.status, body[:200])
+                self.logger.info("24Six: profile status=%s body=%s", resp.status, body[:200])
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: profile selection failed: %s", exc)
 
