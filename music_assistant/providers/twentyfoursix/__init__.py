@@ -209,7 +209,8 @@ class TwentyFourSixProvider(MusicProvider):
                         f"24Six login failed — HTTP {resp.status}. "
                         "Check your username and password."
                     )
-                self.logger.info("24Six: logged in as %s", username)
+                body = await resp.text()
+                self.logger.info("24Six: logged in as %s status=%s body=%s", username, resp.status, body[:300])
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
