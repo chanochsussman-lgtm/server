@@ -552,12 +552,13 @@ class TwentyFourSixProvider(MusicProvider):
         except Exception as exc:
             self.logger.warning("24Six: POST content/%s failed: %s", content_id, exc)
 
-        content_data = data.get("content") or data
+        # The POST /api/v3/music/content/{id} returns track fields directly (no "content" wrapper)
+        # data.get("collection") is the album, not the track
         mux_url = (
-            content_data.get("url") or content_data.get("stream_url") or
-            content_data.get("hls_url") or content_data.get("audio_url") or
-            content_data.get("signed_url") or content_data.get("file_url") or
-            content_data.get("playback_url")
+            data.get("url") or data.get("stream_url") or
+            data.get("hls_url") or data.get("audio_url") or
+            data.get("signed_url") or data.get("file_url") or
+            data.get("playback_url")
         )
 
         # audio_format may be a dict with nested URL
@@ -583,6 +584,7 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_stream_details(self, item_id: str, media_item=None) -> StreamDetails:
         """Return HLS stream details for ffmpeg."""
+        self.logger.info("24Six: get_stream_details called for item_id=%s", item_id)
         mux_url = await self._begin_stream(item_id)
         return StreamDetails(
             item_id=item_id,
