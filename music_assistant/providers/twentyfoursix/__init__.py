@@ -24,7 +24,6 @@ from music_assistant_models.media_items import (
     Album,
     Artist,
     AudioFormat,
-    BrowseFolder,
     ItemMapping,
     MediaItemImage,
     ProviderMapping,
@@ -51,7 +50,6 @@ TOKEN_REFRESH_BUFFER = 300
 
 SUPPORTED_FEATURES = {
     ProviderFeature.SEARCH,
-    ProviderFeature.BROWSE,
     ProviderFeature.LIBRARY_ARTISTS,
     ProviderFeature.LIBRARY_ALBUMS,
     ProviderFeature.LIBRARY_TRACKS,
@@ -191,12 +189,17 @@ class TwentyFourSixProvider(MusicProvider):
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
         """Authenticated GET, auto-retry once on 401."""
         session = await self._get_session()
+        # Inertia apps return JSON when X-Inertia header is present
+        inertia_headers = {
+            "X-Inertia": "true",
+            "X-Inertia-Version": "1",
+        }
         try:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, headers=inertia_headers) as resp:
                 if resp.status == 401:
                     self.logger.warning("24Six: 401 on GET %s — re-logging in", url)
                     await self._login()
-                    async with session.get(url, params=params) as resp2:
+                    async with session.get(url, params=params, headers=inertia_headers) as resp2:
                         resp2.raise_for_status()
                         return await resp2.json(content_type=None)
                 resp.raise_for_status()
@@ -225,48 +228,6 @@ class TwentyFourSixProvider(MusicProvider):
             return {}
 
     # ------------------------------------------------------------------
-    # Browse
-    # ------------------------------------------------------------------
-
-    async def browse(self, path: str) -> list:
-        """Browse the 24Six catalog."""
-        parts = path.split("/") if path else []
-        section = parts[-1] if parts else ""
-
-        if not section or section == self.instance_id:
-            return [
-                BrowseFolder(
-                    item_id="artists",
-                    provider=self.instance_id,
-                    path=f"{self.instance_id}://artists",
-                    name="Artists",
-                ),
-                BrowseFolder(
-                    item_id="albums",
-                    provider=self.instance_id,
-                    path=f"{self.instance_id}://albums",
-                    name="Albums",
-                ),
-                BrowseFolder(
-                    item_id="tracks",
-                    provider=self.instance_id,
-                    path=f"{self.instance_id}://tracks",
-                    name="Tracks",
-                ),
-            ]
-
-        if section == "artists":
-            data = await self._api_get(f"{API_BASE}/music/artists/favorites")
-            return [self._parse_artist(item) for item in data.get("data", [])]
-        if section == "albums":
-            data = await self._api_get(f"{API_BASE}/music/collections/library")
-            return [self._parse_album(item) for item in data.get("data", [])]
-        if section == "tracks":
-            data = await self._api_get(f"{API_BASE}/music/content/favorites")
-            return [self._parse_track(item) for item in data.get("data", [])]
-        return []
-
-    # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
 
@@ -276,7 +237,7 @@ class TwentyFourSixProvider(MusicProvider):
         media_types: list[MediaType] | None = None,
         limit: int = 20,
     ) -> SearchResults:
-        """Search 24Six for artists, albums and tracks."""
+        """Search 24Six using the full Inertia search for rich results with artist/album metadata."""
         data = await self._api_get(
             f"{BASE_URL}/app/music/search",
             params={"q": search_query},
@@ -303,8 +264,8 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
-        data = await self._api_get(f"{API_BASE}/music/artists/favorites")
-        for item in data.get("data", []):
+        data = await self._api_get(f"{BASE_URL}/app/music/search", params={"q": "a"})
+        for item in data.get("props", {}).get("artists", {}).get("tiles", []):
             yield self._parse_artist(item)
 
     async def get_artist(self, prov_artist_id: str) -> Artist:
@@ -329,8 +290,8 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
-        data = await self._api_get(f"{API_BASE}/music/collections/library")
-        for item in data.get("data", []):
+        data = await self._api_get(f"{BASE_URL}/app/music/search", params={"q": "a"})
+        for item in data.get("props", {}).get("collections", {}).get("tiles", []):
             yield self._parse_album(item)
 
     async def get_album(self, prov_album_id: str) -> Album:
@@ -351,8 +312,8 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
-        data = await self._api_get(f"{API_BASE}/music/content/favorites")
-        for item in data.get("data", []):
+        data = await self._api_get(f"{BASE_URL}/app/music/search", params={"q": "a"})
+        for item in data.get("props", {}).get("content", {}).get("tiles", []):
             yield self._parse_track(item)
 
     async def get_track(self, prov_track_id: str) -> Track:
