@@ -159,11 +159,35 @@ class TwentyFourSixProvider(MusicProvider):
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
-        # Step 1: POST /api/v3/login
+        # Step 1: GET profile list without auth to find profile_id
+        # (login requires profile_id, so we must fetch profiles first)
+        if not self._profile_id:
+            self._profile_id = 89214  # default chanoch yosef
+        for endpoint in ["profile-list", "profile/list"]:
+            try:
+                async with session.get(
+                    f"{BASE_URL}/api/v3/{endpoint}",
+                    json={"email": username, "password": password},
+                ) as resp:
+                    body = await resp.text()
+                    self.logger.info("24Six: pre-auth %s status=%s body=%s", endpoint, resp.status, body[:400])
+                    if resp.status == 200:
+                        data = _json.loads(body)
+                        profiles = data if isinstance(data, list) else (data.get("data") or data.get("profiles") or [])
+                        for p in (profiles if isinstance(profiles, list) else []):
+                            self.logger.info("24Six: profile id=%s name=%s", p.get("id"), p.get("name"))
+                            if p.get("id") == 89214 or "chanoch" in str(p.get("name", "")).lower():
+                                self._profile_id = int(p.get("id", 89214))
+                                break
+                        break
+            except aiohttp.ClientError as exc:
+                self.logger.warning("24Six: pre-auth %s failed: %s", endpoint, exc)
+
+        # Step 2: POST /api/v3/login with profile_id
         try:
             async with session.post(
                 f"{BASE_URL}/api/v3/login",
-                json={"email": username, "password": password},
+                json={"email": username, "password": password, "profile_id": self._profile_id},
             ) as resp:
                 body = await resp.text()
                 self.logger.info("24Six: api/v3/login status=%s body=%s", resp.status, body[:400])
@@ -179,54 +203,6 @@ class TwentyFourSixProvider(MusicProvider):
                 self.logger.info("24Six: bearer token length=%s", len(self._bearer_token))
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
-
-        # Step 2: List profiles
-        for endpoint in ["profile-list", "profile/list"]:
-            try:
-                async with session.get(
-                    f"{BASE_URL}/api/v3/{endpoint}",
-                    headers=self._auth_headers(),
-                ) as resp:
-                    body = await resp.text()
-                    self.logger.info("24Six: %s status=%s body=%s", endpoint, resp.status, body[:400])
-                    if resp.status != 200:
-                        continue
-                    data = _json.loads(body)
-                    profiles = data if isinstance(data, list) else (data.get("data") or data.get("profiles") or [])
-                    for p in (profiles if isinstance(profiles, list) else []):
-                        self.logger.info("24Six: profile id=%s name=%s", p.get("id"), p.get("name"))
-                        if p.get("id") == 89214 or "chanoch" in str(p.get("name", "")).lower():
-                            self._profile_id = int(p.get("id", 89214))
-                            self.logger.info("24Six: target profile id=%s name=%s", self._profile_id, p.get("name"))
-                            break
-                    break
-            except aiohttp.ClientError as exc:
-                self.logger.warning("24Six: %s failed: %s", endpoint, exc)
-
-        if not self._profile_id:
-            self._profile_id = 89214
-            self.logger.warning("24Six: profile list failed, defaulting to id=89214")
-
-        # Step 3: POST /api/v3/profile/swap
-        try:
-            async with session.post(
-                f"{BASE_URL}/api/v3/profile/swap",
-                json={"profile_id": self._profile_id},
-                headers=self._auth_headers(),
-            ) as resp:
-                body = await resp.text()
-                self.logger.info("24Six: profile/swap status=%s body=%s", resp.status, body[:300])
-                if resp.status == 200:
-                    data = _json.loads(body)
-                    new_token = (
-                        data.get("token") or data.get("access_token") or
-                        (data.get("data") or {}).get("token") or ""
-                    )
-                    if new_token:
-                        self._bearer_token = new_token
-                        self.logger.info("24Six: profile token length=%s", len(self._bearer_token))
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: profile/swap failed: %s", exc)
 
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
         """Authenticated GET against REST API v3."""
