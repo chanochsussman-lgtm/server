@@ -257,14 +257,17 @@ class TwentyFourSixProvider(MusicProvider):
             return
 
         if section == "artists":
-            async for artist in self.get_library_artists():
-                yield artist
+            data = await self._api_get(f"{API_BASE}/music/artists/favorites")
+            for item in data.get("data", []):
+                yield self._parse_artist(item)
         elif section == "albums":
-            async for album in self.get_library_albums():
-                yield album
+            data = await self._api_get(f"{API_BASE}/music/collections/library")
+            for item in data.get("data", []):
+                yield self._parse_album(item)
         elif section == "tracks":
-            async for track in self.get_library_tracks():
-                yield track
+            data = await self._api_get(f"{API_BASE}/music/content/favorites")
+            for item in data.get("data", []):
+                yield self._parse_track(item)
 
     # ------------------------------------------------------------------
     # Search
