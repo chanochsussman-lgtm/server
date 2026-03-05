@@ -144,6 +144,11 @@ class TwentyFourSixProvider(MusicProvider):
                     "Origin": BASE_URL,
                 }
             )
+            # Seed a device_id cookie — the server uses this to identify the client
+            self._session.cookie_jar.update_cookies(
+                {"device_id": "music-assistant-24six"},
+                aiohttp.client_reqrep.URL(BASE_URL),
+            )
         return self._session
 
     def _xsrf_header(self, session: aiohttp.ClientSession) -> dict[str, str]:
@@ -220,13 +225,22 @@ class TwentyFourSixProvider(MusicProvider):
 
 
     async def _select_profile(self) -> None:
-        """POST /app/profile with empty body to finalize profile selection (browser flow)."""
+        """Follow browser flow: GET /app/music first, then POST /app/profile."""
         session = await self._get_session()
-        # Log session cookie value before profile POST
-        for c in session.cookie_jar:
-            if c.key == "24six_session":
-                self.logger.info("24Six: 24six_session before profile POST = %s", c.value[:40])
+        # Step 1: GET /app/music (browser navigates here after pin-check)
+        try:
+            async with session.get(
+                f"{BASE_URL}/app/music",
+                headers={"Accept": "text/html,application/xhtml+xml", "X-Inertia": "true"},
+                allow_redirects=True,
+            ) as resp:
+                self.logger.info("24Six: GET /app/music status=%s", resp.status)
+        except aiohttp.ClientError as exc:
+            self.logger.warning("24Six: GET /app/music failed: %s", exc)
+
+        # Step 2: POST /app/profile with Referer: /app/music
         xsrf = self._xsrf_header(session)
+        xsrf["Referer"] = f"{BASE_URL}/app/music"
         try:
             async with session.post(
                 f"{BASE_URL}/app/profile",
@@ -234,9 +248,6 @@ class TwentyFourSixProvider(MusicProvider):
             ) as resp:
                 body = await resp.text()
                 self.logger.info("24Six: profile status=%s body=%s", resp.status, body[:300])
-                for c in session.cookie_jar:
-                    if c.key == "24six_session":
-                        self.logger.info("24Six: 24six_session after profile POST = %s", c.value[:40])
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: profile selection failed: %s", exc)
 
