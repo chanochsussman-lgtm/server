@@ -153,11 +153,17 @@ class TwentyFourSixProvider(MusicProvider):
         return {}
 
     async def _login(self) -> None:
-        """Login to 24Six: GET /login for CSRF cookie, then POST credentials."""
+        """Login to 24Six matching the full browser flow:
+        1. GET /login → CSRF cookie
+        2. POST /app/check-existing-user → get profiles list, pick profile
+        3. POST /app/pin-check with profile_id → pre-selects profile
+        4. POST /login with credentials
+        """
         username: str = self.config.get_value(CONF_USERNAME)
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
+        # Step 1: GET /login to obtain XSRF-TOKEN cookie
         try:
             async with session.get(
                 f"{BASE_URL}/login",
@@ -168,9 +174,42 @@ class TwentyFourSixProvider(MusicProvider):
             raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
 
         xsrf = self._xsrf_header(session)
-        if not xsrf:
-            self.logger.warning("24Six: XSRF-TOKEN cookie not found after GET /login")
 
+        # Step 2: check-existing-user to get profiles list
+        profile_id = None
+        try:
+            async with session.post(
+                f"{BASE_URL}/app/check-existing-user",
+                json={"email": username},
+                headers=xsrf,
+            ) as resp:
+                data = await resp.json(content_type=None)
+                profiles = data if isinstance(data, list) else data.get("profiles", [])
+                for p in (profiles or []):
+                    if "chanoch" in (p.get("name") or "").strip().lower():
+                        profile_id = p.get("permission_id") or p.get("id")
+                        break
+                if not profile_id and profiles:
+                    profile_id = profiles[0].get("permission_id") or profiles[0].get("id")
+                self.logger.info("24Six: check-existing-user status=%s profile_id=%s", resp.status, profile_id)
+        except aiohttp.ClientError as exc:
+            self.logger.warning("24Six: check-existing-user failed: %s", exc)
+
+        # Step 3: pin-check with profile_id (pre-selects profile before login)
+        if profile_id:
+            xsrf = self._xsrf_header(session)
+            try:
+                async with session.post(
+                    f"{BASE_URL}/app/pin-check",
+                    json={"profile_id": profile_id},
+                    headers=xsrf,
+                ) as resp:
+                    self.logger.info("24Six: pin-check status=%s", resp.status)
+            except aiohttp.ClientError as exc:
+                self.logger.warning("24Six: pin-check failed: %s", exc)
+
+        # Step 4: POST /login with credentials
+        xsrf = self._xsrf_header(session)
         try:
             async with session.post(
                 f"{BASE_URL}/login",
@@ -188,49 +227,12 @@ class TwentyFourSixProvider(MusicProvider):
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
     async def _select_profile(self) -> None:
-        """Select profile by first calling pin-check then profile, matching the app's login flow."""
+        """After login, POST /app/profile with empty body to finalize profile selection."""
         session = await self._get_session()
         xsrf = self._xsrf_header(session)
         try:
-            # Step 1: Get profiles list
-            async with session.post(
-                f"{BASE_URL}/app/music/search/quick",
-                json={"q": ""},
-                headers=xsrf,
-            ) as resp:
-                profiles = await resp.json(content_type=None)
-
-            if not isinstance(profiles, list) or not profiles:
-                self.logger.warning("24Six: could not retrieve profiles list")
-                return
-
-            # Find chanoch yosef profile
-            chosen = None
-            for p in profiles:
-                if "chanoch" in (p.get("name") or "").strip().lower():
-                    chosen = p
-                    break
-            if not chosen:
-                chosen = profiles[0]
-
-            profile_id = chosen.get("permission_id") or chosen.get("id")
-            profile_name = chosen.get("name", "unknown")
-            self.logger.info("24Six: selecting profile '%s' (id=%s)", profile_name, profile_id)
-
-            # Step 2: pin-check (establishes session cookies for this profile)
-            xsrf = self._xsrf_header(session)
-            async with session.post(
-                f"{BASE_URL}/app/pin-check",
-                json={"profile_id": profile_id},
-                headers=xsrf,
-            ) as resp:
-                self.logger.info("24Six: pin-check status=%s", resp.status)
-
-            # Step 3: profile selection (finalizes profile)
-            xsrf = self._xsrf_header(session)
             async with session.post(
                 f"{BASE_URL}/app/profile",
-                json={"profile_id": profile_id},
                 headers=xsrf,
             ) as resp:
                 body = await resp.text()
