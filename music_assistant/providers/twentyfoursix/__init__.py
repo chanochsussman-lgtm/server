@@ -229,17 +229,14 @@ class TwentyFourSixProvider(MusicProvider):
         parts = path.split("://", 1)
         sub = parts[1].lstrip("/") if len(parts) > 1 else ""
 
-        # Fetch homepage data (plain XHR, no Inertia header)
-        session = await self._get_session()
+        # Fetch homepage data via authenticated API
+        raw = await self._api_get(f"{BASE_URL}/api/v3/music")
+        # v3 API may return {"data": [...]} or a list directly
         homepage: list[dict] = []
-        try:
-            async with session.get(
-                f"{BASE_URL}/api/v3/music"
-            ) as resp:
-                resp.raise_for_status()
-                homepage = await resp.json(content_type=None)
-        except aiohttp.ClientError as exc:
-            self.logger.error("24Six: featured-homepage error: %s", exc)
+        if isinstance(raw, list):
+            homepage = raw
+        elif isinstance(raw, dict):
+            homepage = raw.get("data") or raw.get("tiles") or raw.get("sections") or []
 
         if not sub:
             # Root → one BrowseFolder per category
@@ -303,21 +300,23 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.warning("24Six: search returned unexpected type %s", type(data).__name__)
             return SearchResults()
 
-        props = data.get("props", {})
-        if not isinstance(props, dict):
-            props = {}
+        # v3 API: {"artists": [...], "collections": [...], "tiles": [...]}
+        # or wrapped: {"data": {"artists": [...], ...}}
+        props = data
+        if "data" in data and isinstance(data["data"], dict):
+            props = data["data"]
 
         results = SearchResults()
 
         if not media_types or MediaType.ARTIST in media_types:
-            tiles = props.get("artists", {})
+            tiles = props.get("artists", [])
             if isinstance(tiles, dict):
-                tiles = tiles.get("tiles", [])
+                tiles = tiles.get("tiles", []) or tiles.get("data", [])
             for item in (tiles or [])[:limit]:
                 results.artists.append(self._parse_artist(item))
 
         if not media_types or MediaType.ALBUM in media_types:
-            tiles = props.get("collections", {})
+            tiles = props.get("collections", [])
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", [])
             for item in (tiles or [])[:limit]:
