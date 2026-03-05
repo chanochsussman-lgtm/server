@@ -207,16 +207,21 @@ class TwentyFourSixProvider(MusicProvider):
                 self.logger.warning("24Six: could not retrieve profiles list")
                 return
 
-            # Find the "chanoch yosef" profile (id=89214) or fall back to first adult profile
+            # Log all profiles for debugging
+            for p in profiles:
+                self.logger.info(
+                    "24Six: found profile id=%s permission_id=%s name=%s dob=%s",
+                    p.get("id"), p.get("permission_id"), p.get("name"), p.get("date_of_birth")
+                )
+
+            # Find chanoch yosef — the adult account (no date_of_birth)
             chosen = None
             for p in profiles:
                 name = (p.get("name") or "").strip().lower()
-                # Prefer the main account profile (not child profiles)
-                if "chanoch" in name or p.get("id") == 89214:
+                if "chanoch" in name:
                     chosen = p
                     break
             if not chosen:
-                # Fall back: pick the profile without a date_of_birth (adult account)
                 for p in profiles:
                     if not p.get("date_of_birth"):
                         chosen = p
@@ -224,7 +229,8 @@ class TwentyFourSixProvider(MusicProvider):
             if not chosen:
                 chosen = profiles[0]
 
-            permission_id = chosen.get("permission_id") or chosen.get("id")
+            # Use permission_id for the POST endpoint
+            permission_id = chosen.get("permission_id")
             profile_name = chosen.get("name", "unknown")
             self.logger.info("24Six: selecting profile '%s' (permission_id=%s)", profile_name, permission_id)
             xsrf = self._xsrf_header(session)
@@ -232,7 +238,8 @@ class TwentyFourSixProvider(MusicProvider):
                 f"{BASE_URL}/app/profile/{permission_id}",
                 headers=xsrf,
             ) as resp:
-                self.logger.info("24Six: profile selection status=%s", resp.status)
+                body = await resp.text()
+                self.logger.info("24Six: profile selection status=%s body=%s", resp.status, body[:200])
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: profile selection failed: %s", exc)
 
@@ -311,7 +318,6 @@ class TwentyFourSixProvider(MusicProvider):
                     provider=self.instance_id,
                     path=f"{self.instance_id}://category/{cat_id}",
                     name=cat_title,
-                    label=cat_title,
                 )
                 if cat_img:
                     folder.metadata.images = [
@@ -350,7 +356,12 @@ class TwentyFourSixProvider(MusicProvider):
         )
 
         # _api_get returns {} on error; Inertia response is {props: {...}}
-        # If we somehow got a list (e.g. still hitting profiles endpoint), bail out
+        # Log first 500 chars of response to diagnose unexpected formats
+        self.logger.info("24Six: search raw type=%s keys=%s snippet=%s",
+            type(data).__name__,
+            list(data.keys()) if isinstance(data, dict) else "n/a",
+            str(data)[:300],
+        )
         if not isinstance(data, dict):
             self.logger.warning("24Six: search returned unexpected type %s", type(data).__name__)
             return SearchResults()
