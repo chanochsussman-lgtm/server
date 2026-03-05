@@ -217,18 +217,18 @@ class TwentyFourSixProvider(MusicProvider):
 
 
     async def _select_profile(self) -> None:
-        """After login, POST /app/profile with empty body to finalize profile selection."""
+        """After pin-check, GET /app/music to follow the 'next' redirect and activate profile."""
         session = await self._get_session()
-        xsrf = self._xsrf_header(session)
         try:
-            async with session.post(
-                f"{BASE_URL}/app/profile",
-                headers=xsrf,
+            async with session.get(
+                f"{BASE_URL}/app/music",
+                headers={"Accept": "text/html,application/xhtml+xml", "X-Inertia": "true"},
+                allow_redirects=True,
             ) as resp:
                 body = await resp.text()
-                self.logger.info("24Six: profile status=%s body=%s", resp.status, body[:200])
+                self.logger.info("24Six: app/music status=%s body=%s", resp.status, body[:200])
         except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: profile selection failed: %s", exc)
+            self.logger.warning("24Six: app/music failed: %s", exc)
 
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
         """Authenticated GET, auto-retry once on 401."""
