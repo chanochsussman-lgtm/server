@@ -188,31 +188,51 @@ class TwentyFourSixProvider(MusicProvider):
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
     async def _select_profile(self) -> None:
-        """After login, select the user profile via GET /app/profile (returns current profile object)."""
+        """After login, select profile by POSTing to /app/profile/{permission_id}.
+        
+        The profiles list is obtained via POST /app/music/search/quick with empty query,
+        which returns the list before a profile is selected.
+        """
         session = await self._get_session()
         xsrf = self._xsrf_header(session)
         try:
-            # GET /app/profile returns the current profile as a single object
-            async with session.get(f"{BASE_URL}/app/profile", headers=xsrf) as resp:
-                profile = await resp.json(content_type=None)
-
-            # Normalise: could be a list or a single dict
-            if isinstance(profile, list):
-                profile = profile[0] if profile else {}
-
-            if not isinstance(profile, dict) or not profile.get("id"):
-                self.logger.warning("24Six: unexpected profile response: %s", str(profile)[:200])
-                return
-
-            profile_id = profile["id"]
-            profile_name = profile.get("name", "unknown")
-            self.logger.info("24Six: activating profile '%s' (id=%s)", profile_name, profile_id)
-            xsrf = self._xsrf_header(session)
             async with session.post(
-                f"{BASE_URL}/app/profile/{profile_id}",
+                f"{BASE_URL}/app/music/search/quick",
+                json={"q": ""},
                 headers=xsrf,
             ) as resp:
-                self.logger.info("24Six: profile activation status=%s", resp.status)
+                profiles = await resp.json(content_type=None)
+
+            if not isinstance(profiles, list) or not profiles:
+                self.logger.warning("24Six: could not retrieve profiles list")
+                return
+
+            # Find the "chanoch yosef" profile (id=89214) or fall back to first adult profile
+            chosen = None
+            for p in profiles:
+                name = (p.get("name") or "").strip().lower()
+                # Prefer the main account profile (not child profiles)
+                if "chanoch" in name or p.get("id") == 89214:
+                    chosen = p
+                    break
+            if not chosen:
+                # Fall back: pick the profile without a date_of_birth (adult account)
+                for p in profiles:
+                    if not p.get("date_of_birth"):
+                        chosen = p
+                        break
+            if not chosen:
+                chosen = profiles[0]
+
+            permission_id = chosen.get("permission_id") or chosen.get("id")
+            profile_name = chosen.get("name", "unknown")
+            self.logger.info("24Six: selecting profile '%s' (permission_id=%s)", profile_name, permission_id)
+            xsrf = self._xsrf_header(session)
+            async with session.post(
+                f"{BASE_URL}/app/profile/{permission_id}",
+                headers=xsrf,
+            ) as resp:
+                self.logger.info("24Six: profile selection status=%s", resp.status)
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: profile selection failed: %s", exc)
 
@@ -261,14 +281,12 @@ class TwentyFourSixProvider(MusicProvider):
     # Browse
     # ------------------------------------------------------------------
 
-    async def browse(self, path: str) -> AsyncGenerator[BrowseFolder | Album, None]:
+    async def browse(self, path: str) -> list[BrowseFolder | Album]:
         """Browse the 24Six featured homepage, organised by category."""
-        # path == "<instance_id>//" → root, yield category folders
-        # path == "<instance_id>//category/<cat_id>" → yield albums in that category
         parts = path.split("://", 1)
         sub = parts[1].lstrip("/") if len(parts) > 1 else ""
 
-        # Fetch homepage data (plain XHR JSON, no Inertia header needed)
+        # Fetch homepage data (plain XHR, no Inertia header)
         session = await self._get_session()
         homepage: list[dict] = []
         try:
@@ -281,7 +299,8 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.error("24Six: featured-homepage error: %s", exc)
 
         if not sub:
-            # Root → yield one BrowseFolder per category
+            # Root → one BrowseFolder per category
+            items: list[BrowseFolder | Album] = []
             for section in homepage:
                 cat = section.get("category", {})
                 cat_id = str(cat.get("id", ""))
@@ -298,18 +317,21 @@ class TwentyFourSixProvider(MusicProvider):
                     folder.metadata.images = [
                         MediaItemImage(type=ImageType.THUMB, path=cat_img, provider=self.instance_id)
                     ]
-                yield folder
-            return
+                items.append(folder)
+            return items
 
-        # Category subfolder → yield albums for that category
+        # Category subfolder → albums for that category
         if sub.startswith("category/"):
             cat_id = sub.split("/", 1)[1]
             for section in homepage:
                 if str(section.get("category", {}).get("id", "")) == cat_id:
-                    for item in section.get("data", []):
-                        if item.get("type") == "collection":
-                            yield self._parse_album(item)
-                    return
+                    return [
+                        self._parse_album(item)
+                        for item in section.get("data", [])
+                        if item.get("type") == "collection"
+                    ]
+
+        return []
 
     # ------------------------------------------------------------------
     # Search
@@ -326,20 +348,38 @@ class TwentyFourSixProvider(MusicProvider):
             f"{BASE_URL}/app/music/search",
             params={"q": search_query},
         )
+
+        # _api_get returns {} on error; Inertia response is {props: {...}}
+        # If we somehow got a list (e.g. still hitting profiles endpoint), bail out
+        if not isinstance(data, dict):
+            self.logger.warning("24Six: search returned unexpected type %s", type(data).__name__)
+            return SearchResults()
+
         props = data.get("props", {})
+        if not isinstance(props, dict):
+            props = {}
 
         results = SearchResults()
 
         if not media_types or MediaType.ARTIST in media_types:
-            for item in (props.get("artists", {}).get("tiles", []) or [])[:limit]:
+            tiles = props.get("artists", {})
+            if isinstance(tiles, dict):
+                tiles = tiles.get("tiles", [])
+            for item in (tiles or [])[:limit]:
                 results.artists.append(self._parse_artist(item))
 
         if not media_types or MediaType.ALBUM in media_types:
-            for item in (props.get("collections", {}).get("tiles", []) or [])[:limit]:
+            tiles = props.get("collections", {})
+            if isinstance(tiles, dict):
+                tiles = tiles.get("tiles", [])
+            for item in (tiles or [])[:limit]:
                 results.albums.append(self._parse_album(item))
 
         if not media_types or MediaType.TRACK in media_types:
-            for item in (props.get("content", {}).get("tiles", []) or [])[:limit]:
+            tiles = props.get("content", {})
+            if isinstance(tiles, dict):
+                tiles = tiles.get("tiles", [])
+            for item in (tiles or [])[:limit]:
                 results.tracks.append(self._parse_track(item))
 
         return results
