@@ -217,30 +217,19 @@ class TwentyFourSixProvider(MusicProvider):
 
 
     async def _select_profile(self) -> None:
-        """After pin-check, follow the next URL to activate the profile session."""
+        """POST to /profiles/select to finalize profile selection after pin-check."""
         session = await self._get_session()
+        xsrf = self._xsrf_header(session)
         try:
-            # First: follow next URL without X-Inertia to let server set session cookies
-            async with session.get(
-                f"{BASE_URL}/app/music",
-                headers={"Accept": "text/html,application/xhtml+xml"},
-                allow_redirects=False,
+            async with session.post(
+                f"{BASE_URL}/profiles/select",
+                json={"profile_id": 89214},
+                headers=xsrf,
             ) as resp:
-                self.logger.info("24Six: app/music status=%s location=%s", resp.status, resp.headers.get("Location", "none"))
-                # If redirected to profile page, POST /app/profile to confirm selection
-                location = resp.headers.get("Location", "")
-                if "profile" in location.lower() or resp.status in (301, 302):
-                    self.logger.info("24Six: redirected, posting to /app/profile")
-                    xsrf = self._xsrf_header(session)
-                    async with session.post(
-                        f"{BASE_URL}/app/profile",
-                        json={"profile_id": 89214},
-                        headers=xsrf,
-                    ) as resp2:
-                        body2 = await resp2.text()
-                        self.logger.info("24Six: post profile status=%s body=%s", resp2.status, body2[:200])
+                body = await resp.text()
+                self.logger.info("24Six: profiles/select status=%s body=%s", resp.status, body[:300])
         except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: profile activation failed: %s", exc)
+            self.logger.warning("24Six: profiles/select failed: %s", exc)
 
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
         """Authenticated GET, auto-retry once on 401."""
