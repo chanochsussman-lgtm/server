@@ -163,19 +163,28 @@ class TwentyFourSixProvider(MusicProvider):
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
-        # Step 1: GET /login to obtain XSRF-TOKEN cookie and _token value
+        # Step 1: GET /login to obtain XSRF-TOKEN cookie and extract _token from HTML
+        import re
+        _token = ""
         try:
             async with session.get(
                 f"{BASE_URL}/login",
                 headers={"Accept": "text/html,application/xhtml+xml"},
             ) as resp:
                 resp.raise_for_status()
+                html = await resp.text()
+                m = re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
+                if not m:
+                    m = re.search(r'name="_token"[^>]+value="([^"]+)"', html)
+                if m:
+                    _token = m.group(1)
+                    self.logger.info("24Six: extracted _token length=%s", len(_token))
+                else:
+                    self.logger.warning("24Six: could not find _token in login HTML")
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
 
         xsrf = self._xsrf_header(session)
-        # _token is the URL-decoded XSRF-TOKEN cookie value
-        _token = xsrf.get("X-XSRF-TOKEN", "")
 
         # Step 2: POST /check-existing-user with form data to get profiles list
         profile_id = None
