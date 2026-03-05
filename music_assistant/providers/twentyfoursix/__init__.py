@@ -195,8 +195,21 @@ class TwentyFourSixProvider(MusicProvider):
                 headers=xsrf,
             ) as resp:
                 data = await resp.json(content_type=None)
-                self.logger.info("24Six: check-existing-user status=%s data=%s", resp.status, str(data)[:300])
-                profiles = data if isinstance(data, list) else (data.get("profiles") or data.get("data") or [])
+                self.logger.info("24Six: check-existing-user status=%s keys=%s", resp.status, list(data.keys()) if isinstance(data, dict) else type(data).__name__)
+                # Response is {"user": {..., "profiles": [...]}} or similar
+                if isinstance(data, list):
+                    profiles = data
+                elif isinstance(data, dict):
+                    user = data.get("user") or {}
+                    profiles = (
+                        data.get("profiles")
+                        or user.get("profiles")
+                        or data.get("data")
+                        or []
+                    )
+                    self.logger.info("24Six: user keys=%s profiles_count=%s", list(user.keys())[:10], len(profiles))
+                else:
+                    profiles = []
                 for p in (profiles or []):
                     if "chanoch" in (p.get("name") or "").strip().lower():
                         profile_id = p.get("permission_id") or p.get("id")
