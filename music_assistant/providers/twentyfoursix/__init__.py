@@ -792,15 +792,8 @@ class TwentyFourSixProvider(MusicProvider):
             provider=self.instance_id,
             name=data.get("title") or "Unknown Track",
             artists=artist_mappings,
-            album=(
-                ItemMapping(
-                    item_id=str(collection.get("id") or data.get("collection_id", "")),
-                    provider=self.instance_id,
-                    name=collection.get("title", ""),
-                )
-                if (collection.get("id") or data.get("collection_id"))
-                else None
-            ),
+            # Do NOT set album= here - MA tries to resolve it via get_library_item_by_prov_id
+            # which calls get_controller(MediaType.ALBUM) → NotImplementedError in this fork
             duration=data.get("length", 0),
             track_number=data.get("track_num"),
             provider_mappings={
