@@ -224,78 +224,148 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.warning("24Six: GET %s failed: %s", url, exc)
             return {}
 
-    async def browse(self, path: str) -> list[BrowseFolder | Album]:
-        """Browse the 24Six featured homepage, organised by category."""
+    # Dashboard tile sections mirroring the 24Six app homepage
+    DASHBOARD_SECTIONS = [
+        ("trending_now",           "Trending Now 🔥"),
+        ("new_releases",           "New Releases"),
+        ("featured_for_you",       "Featured For You"),
+        ("featured_new_releases",  "Featured New Releases"),
+        ("top_artists",            "Top Artists"),
+        ("featured_br_new_releases", "Brand New Releases"),
+    ]
+
+    async def browse(self, path: str) -> list[BrowseFolder | Album | Artist]:
+        """Browse 24Six mirroring the app homepage structure."""
         parts = path.split("://", 1)
         sub = parts[1].lstrip("/") if len(parts) > 1 else ""
 
-        # Fetch homepage data via authenticated POST to /api/v3/music
-        import json as _json3
-        session2 = await self._get_session()
-        raw = {}
-        try:
-            async with session2.post(
-                f"{BASE_URL}/api/v3/music",
-                json={},
-                headers=self._auth_headers(),
-            ) as resp2:
-                body2 = await resp2.text()
-                self.logger.info("24Six: POST /api/v3/music status=%s body=%s", resp2.status, body2[:1500])
-                raw = _json3.loads(body2) if body2 else {}
-        except Exception as exc2:
-            self.logger.warning("24Six: POST /api/v3/music failed: %s", exc2)
-            # Fall back to GET
-            raw = await self._api_get(f"{BASE_URL}/api/v3/music")
-        self.logger.info("24Six: browse raw keys=%s full=%s", 
-            list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
-            str(raw)[:1000])
-        # v3 API may return {"data": [...]} or a list directly
-        homepage: list[dict] = []
-        if isinstance(raw, list):
-            homepage = raw
-        elif isinstance(raw, dict):
-            # Try all possible wrapper keys
-            for key in ("data", "tiles", "sections", "results", "content", "items", "music"):
-                val = raw.get(key)
-                if val and isinstance(val, list):
-                    homepage = val
-                    self.logger.info("24Six: browse found content under key=%s count=%s", key, len(val))
-                    break
-            if not homepage:
-                # Maybe the dict itself IS the content map
-                self.logger.info("24Six: browse no list found, raw=%s", str(raw)[:500])
-
+        # Root: show section folders mirroring app dashboard
         if not sub:
-            # Root → one BrowseFolder per category
-            items: list[BrowseFolder | Album] = []
-            for section in homepage:
-                cat = section.get("category", {})
-                cat_id = str(cat.get("id", ""))
-                cat_title = cat.get("title") or cat.get("title_hebrew") or cat_id
-                cat_img = self._img_url(cat.get("img"))
+            # Also fetch the main dashboard to get any extra sections
+            raw = await self._api_get(f"{BASE_URL}/api/v3/music")
+            self.logger.info("24Six: dashboard keys=%s snippet=%s",
+                list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+                str(raw)[:800])
+
+            items: list[BrowseFolder] = []
+
+            # Fixed sections from app
+            for tile_type, label in self.DASHBOARD_SECTIONS:
                 folder = BrowseFolder(
-                    item_id=f"category_{cat_id}",
+                    item_id=f"section_{tile_type}",
                     provider=self.instance_id,
-                    path=f"{self.instance_id}://category/{cat_id}",
-                    name=cat_title,
+                    path=f"{self.instance_id}://section/{tile_type}",
+                    name=label,
                 )
-                if cat_img:
-                    folder.metadata.images = [
-                        MediaItemImage(type=ImageType.THUMB, path=cat_img, provider=self.instance_id)
-                    ]
                 items.append(folder)
+
+            # Dynamic sections from API response
+            if isinstance(raw, dict):
+                for key, val in raw.items():
+                    if isinstance(val, list) and val and key not in ("errors",):
+                        # Skip keys already covered
+                        already = {t for t, _ in self.DASHBOARD_SECTIONS}
+                        if key not in already and key not in ("data", "message"):
+                            folder = BrowseFolder(
+                                item_id=f"section_{key}",
+                                provider=self.instance_id,
+                                path=f"{self.instance_id}://section/{key}",
+                                name=key.replace("_", " ").title(),
+                            )
+                            items.append(folder)
+
+            # Also add Library and Categories folders
+            items.append(BrowseFolder(
+                item_id="section_library",
+                provider=self.instance_id,
+                path=f"{self.instance_id}://section/library",
+                name="My Library ♪",
+            ))
+            items.append(BrowseFolder(
+                item_id="section_category",
+                provider=self.instance_id,
+                path=f"{self.instance_id}://section/category",
+                name="Browse Categories",
+            ))
+
             return items
 
-        # Category subfolder → albums for that category
-        if sub.startswith("category/"):
-            cat_id = sub.split("/", 1)[1]
-            for section in homepage:
-                if str(section.get("category", {}).get("id", "")) == cat_id:
-                    return [
-                        self._parse_album(item)
-                        for item in section.get("data", [])
-                        if item.get("type") == "collection"
-                    ]
+        # Section drill-down: fetch /api/v3/music/{tile_type}
+        if sub.startswith("section/"):
+            tile_type = sub.split("/", 1)[1]
+
+            if tile_type == "library":
+                raw = await self._api_get(f"{BASE_URL}/api/v3/music/library")
+            elif tile_type == "category":
+                raw = await self._api_get(f"{BASE_URL}/api/v3/music/category")
+            else:
+                raw = await self._api_get(f"{BASE_URL}/api/v3/music/{tile_type}")
+
+            self.logger.info("24Six: section/%s keys=%s snippet=%s",
+                tile_type,
+                list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+                str(raw)[:800])
+
+            results: list = []
+
+            # Unwrap possible containers
+            data = raw
+            if isinstance(raw, dict):
+                for wrap_key in ("data", "tiles", "results", "items", "content"):
+                    if isinstance(raw.get(wrap_key), list):
+                        data = raw[wrap_key]
+                        break
+
+            if isinstance(data, list):
+                for item in data:
+                    item_type = item.get("type", "")
+                    if item_type in ("collection", "album"):
+                        results.append(self._parse_album(item))
+                    elif item_type == "artist":
+                        results.append(self._parse_artist(item))
+                    elif item_type in ("content", "track", "song"):
+                        results.append(self._parse_track(item))
+                    elif item_type == "category":
+                        folder = BrowseFolder(
+                            item_id=f"category_{item.get('id')}",
+                            provider=self.instance_id,
+                            path=f"{self.instance_id}://section/category/{item.get('id')}",
+                            name=item.get("title") or item.get("name") or str(item.get("id")),
+                        )
+                        img = self._img_url(item.get("img") or item.get("image"))
+                        if img:
+                            folder.metadata.images = [MediaItemImage(type=ImageType.THUMB, path=img, provider=self.instance_id)]
+                        results.append(folder)
+                    else:
+                        # Try to guess from keys present
+                        if "collection_count" in item or "bio" in item:
+                            results.append(self._parse_artist(item))
+                        elif "track_count" in item or "tracks" in item:
+                            results.append(self._parse_album(item))
+                        else:
+                            results.append(self._parse_album(item))
+            elif isinstance(data, dict):
+                # Some sections return nested structure
+                for key in ("collections", "artists", "content", "songs", "albums", "playlists"):
+                    items_list = data.get(key, [])
+                    if isinstance(items_list, list):
+                        for item in items_list[:20]:
+                            if key in ("artists",):
+                                results.append(self._parse_artist(item))
+                            elif key in ("songs", "content"):
+                                results.append(self._parse_track(item))
+                            else:
+                                results.append(self._parse_album(item))
+
+            return results
+
+        # Category sub-drill: /section/category/{id}
+        if sub.startswith("section/category/"):
+            cat_id = sub.split("/")[2]
+            raw = await self._api_get(f"{BASE_URL}/api/v3/music/category", params={"id": cat_id})
+            self.logger.info("24Six: category/%s snippet=%s", cat_id, str(raw)[:600])
+            data = raw if isinstance(raw, list) else raw.get("data") or raw.get("tiles") or []
+            return [self._parse_album(item) for item in data if isinstance(item, dict)]
 
         return []
 
@@ -353,16 +423,18 @@ class TwentyFourSixProvider(MusicProvider):
                 results.artists.append(self._parse_artist(item))
 
         if not media_types or MediaType.ALBUM in media_types:
-            tiles = props.get("collections", [])
+            # API returns both 'collections' and 'albums'
+            tiles = props.get("collections") or props.get("albums") or []
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", [])
             for item in (tiles or [])[:limit]:
                 results.albums.append(self._parse_album(item))
 
         if not media_types or MediaType.TRACK in media_types:
-            tiles = props.get("content", {})
+            # API returns tracks under 'songs' or 'content'
+            tiles = props.get("songs") or props.get("content") or []
             if isinstance(tiles, dict):
-                tiles = tiles.get("tiles", [])
+                tiles = tiles.get("tiles", []) or tiles.get("data", [])
             for item in (tiles or [])[:limit]:
                 results.tracks.append(self._parse_track(item))
 
@@ -463,7 +535,7 @@ class TwentyFourSixProvider(MusicProvider):
         return StreamDetails(
             item_id=item_id,
             provider=self.instance_id,
-            audio_format=AudioFormat(content_type=ContentType.HLS),
+            audio_format=AudioFormat(content_type=ContentType.AAC),
             stream_type=StreamType.HTTP,
             path=mux_url,
         )
@@ -567,7 +639,7 @@ class TwentyFourSixProvider(MusicProvider):
                     item_id=track_id,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
-                    audio_format=AudioFormat(content_type=ContentType.HLS),
+                    audio_format=AudioFormat(content_type=ContentType.AAC),
                     url=data.get("preview_url"),
                 )
             },
