@@ -154,17 +154,16 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def _login(self) -> None:
         """Login to 24Six matching the full browser flow:
-        1. GET /login → CSRF token
-        2. POST /check-existing-user with _token+email+password → profiles list
-        3. POST /profiles/pin-check with profile_id → pre-selects profile
-        4. POST /login with credentials → finalize auth
+        1. GET /login → CSRF token from HTML
+        2. POST /profiles/pin-check with profile_id=89214
+        3. POST /login with credentials
         """
         username: str = self.config.get_value(CONF_USERNAME)
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
         # Step 1: GET /login to obtain XSRF-TOKEN cookie and extract _token from HTML
-        import re
+        import re as _re
         _token = ""
         try:
             async with session.get(
@@ -173,9 +172,9 @@ class TwentyFourSixProvider(MusicProvider):
             ) as resp:
                 resp.raise_for_status()
                 html = await resp.text()
-                m = re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
+                m = _re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
                 if not m:
-                    m = re.search(r'name="_token"[^>]+value="([^"]+)"', html)
+                    m = _re.search(r'name="_token"[^>]+value="([^"]+)"', html)
                 if m:
                     _token = m.group(1)
                     self.logger.info("24Six: extracted _token length=%s", len(_token))
@@ -184,56 +183,19 @@ class TwentyFourSixProvider(MusicProvider):
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
 
+        # Step 2: POST /profiles/pin-check to pre-select profile (must happen before login)
         xsrf = self._xsrf_header(session)
-
-        # Step 2: POST /check-existing-user with form data to get profiles list
-        profile_id = None
         try:
             async with session.post(
-                f"{BASE_URL}/check-existing-user",
-                data={"_token": _token, "email": username, "password": password},
+                f"{BASE_URL}/profiles/pin-check",
+                json={"profile_id": 89214},
                 headers=xsrf,
             ) as resp:
-                data = await resp.json(content_type=None)
-                self.logger.info("24Six: check-existing-user status=%s keys=%s", resp.status, list(data.keys()) if isinstance(data, dict) else type(data).__name__)
-                # Response is {"user": {..., "profiles": [...]}} or similar
-                if isinstance(data, list):
-                    profiles = data
-                elif isinstance(data, dict):
-                    user = data.get("user") or {}
-                    profiles = (
-                        data.get("profiles")
-                        or user.get("profiles")
-                        or data.get("data")
-                        or []
-                    )
-                    self.logger.info("24Six: user keys=%s profiles_count=%s", list(user.keys())[:10], len(profiles))
-                else:
-                    profiles = []
-                for p in (profiles or []):
-                    if "chanoch" in (p.get("name") or "").strip().lower():
-                        profile_id = p.get("permission_id") or p.get("id")
-                        break
-                if not profile_id and profiles:
-                    profile_id = profiles[0].get("permission_id") or profiles[0].get("id")
-                self.logger.info("24Six: check-existing-user profile_id=%s", profile_id)
+                self.logger.info("24Six: pin-check status=%s", resp.status)
         except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: check-existing-user failed: %s", exc)
+            self.logger.warning("24Six: pin-check failed: %s", exc)
 
-        # Step 3: POST /profiles/pin-check to pre-select profile
-        if profile_id:
-            xsrf = self._xsrf_header(session)
-            try:
-                async with session.post(
-                    f"{BASE_URL}/profiles/pin-check",
-                    json={"profile_id": profile_id},
-                    headers=xsrf,
-                ) as resp:
-                    self.logger.info("24Six: pin-check status=%s", resp.status)
-            except aiohttp.ClientError as exc:
-                self.logger.warning("24Six: pin-check failed: %s", exc)
-
-        # Step 4: POST /login with credentials to finalize auth
+        # Step 3: POST /login with credentials
         xsrf = self._xsrf_header(session)
         try:
             async with session.post(
@@ -250,6 +212,7 @@ class TwentyFourSixProvider(MusicProvider):
                 self.logger.info("24Six: logged in as %s", username)
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
+
 
     async def _select_profile(self) -> None:
         """After login, POST /app/profile with empty body to finalize profile selection."""
