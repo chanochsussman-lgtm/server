@@ -153,7 +153,7 @@ class TwentyFourSixProvider(MusicProvider):
         return {}
 
     async def _login(self) -> None:
-        """Login via REST API v3, list profiles, and swap to chanoch yosef."""
+        """Login via REST API v3."""
         import json as _json
         username: str = self.config.get_value(CONF_USERNAME)
         password: str = self.config.get_value(CONF_PASSWORD)
@@ -520,11 +520,8 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def _begin_stream(self, content_id: str, audio_format: str = "m4a") -> str:
-        """Construct the stream URL exactly as the TfsMediaSource class does in the APK.
-
-        From bytecode disassembly of TfsMediaSource.isIdentifier / invoke:
-          https://24six.app/api/v3/content/{content_id}/play?format={audio_format}
-        Auth is the standard Bearer token header. No separate API call needed.
+        """Construct stream URL per TfsMediaSource APK bytecode, with token embedded
+        so ffmpeg can fetch it directly without custom auth headers.
         """
         cached = self._stream_url_cache.get(content_id)
         if cached:
@@ -532,21 +529,26 @@ class TwentyFourSixProvider(MusicProvider):
             if time.time() < expiry - TOKEN_REFRESH_BUFFER:
                 return stream_url
 
-stream_url = (
-    f"https://24six.app/api/v3/content/{content_id}"
-    f"/play?format={audio_format}&token={self._bearer_token}"
-)
-self.logger.info("24Six: constructed stream URL: https://24six.app/api/v3/content/%s/play?format=%s&token=<redacted>", content_id, audio_format)
+        # Embed Bearer token as query param — ffmpeg fetches the URL directly
+        # and doesn't send custom headers, so auth must be in the URL itself.
+        stream_url = (
+            f"https://24six.app/api/v3/content/{content_id}"
+            f"/play?format={audio_format}&token={self._bearer_token}"
+        )
+        self.logger.info(
+            "24Six: constructed stream URL: https://24six.app/api/v3/content/%s/play?format=%s&token=<redacted>",
+            content_id, audio_format
+        )
 
         expiry = int(time.time()) + 6 * 3600
         self._stream_url_cache[content_id] = (stream_url, expiry)
         return stream_url
 
     async def get_stream_details(self, item_id: str, media_item=None) -> StreamDetails:
-        """Return stream details. URL constructed locally per TfsMediaSource APK bytecode.
+        """Return stream details. URL constructed per TfsMediaSource APK bytecode.
 
-        Fetches content metadata first to get audio_format ("m4a", "ogg", "m3u8"),
-        then constructs: https://24six.app/api/v3/content/{id}/play?format={audio_format}
+        Fetches content metadata to get audio_format ("m4a", "ogg", "m3u8"), then builds:
+          https://24six.app/api/v3/content/{id}/play?format={audio_format}&token={bearer}
         """
         self.logger.info("24Six: get_stream_details called for item_id=%s", item_id)
 
@@ -581,7 +583,7 @@ self.logger.info("24Six: constructed stream URL: https://24six.app/api/v3/conten
             content_type = ContentType.AAC
 
         stream_url = await self._begin_stream(item_id, audio_fmt)
-        self.logger.info("24Six: streaming %s via %s (fmt=%s)", item_id, stream_url, audio_fmt)
+        self.logger.info("24Six: streaming %s fmt=%s", item_id, audio_fmt)
 
         return StreamDetails(
             item_id=item_id,
