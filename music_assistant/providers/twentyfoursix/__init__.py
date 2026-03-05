@@ -500,10 +500,14 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
-        # v3: content is list directly or wrapped
-        tracks = data.get("content") or data.get("tracks") or []
+        # v3: collection endpoint returns {"collection": {...}, "contents": [...]}
+        # Note: "contents" not "content"!
+        tracks = (data.get("contents") or data.get("content") or 
+                  data.get("tracks") or
+                  (data.get("collection") or {}).get("contents") or [])
         if isinstance(tracks, dict):
             tracks = tracks.get("tiles") or tracks.get("data") or []
+        self.logger.error("24Six: album %s tracks count=%s", prov_album_id, len(tracks))
         return [self._parse_track(t) for t in tracks if isinstance(t, dict)]
 
     # ------------------------------------------------------------------
@@ -548,48 +552,70 @@ class TwentyFourSixProvider(MusicProvider):
 
         import json as _js
         session = await self._get_session()
+        mux_url = None
 
-        # Step 1: POST /api/v3/music/content/{id} to get full content detail with stream URL
-        data = {}
-        try:
-            async with session.post(
-                f"{BASE_URL}/api/v3/music/content/{content_id}",
-                json={},
-                headers=self._auth_headers(),
-            ) as resp:
-                body = await resp.text()
-                data = _js.loads(body) if body else {}
-                self.logger.info("24Six: POST content/%s status=%s keys=%s audio_format=%s", 
-                    content_id, resp.status, 
-                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-                    str(data.get("audio_format", "MISSING"))[:300])
-        except Exception as exc:
-            self.logger.warning("24Six: POST content/%s failed: %s", content_id, exc)
+        # Attempt 1: GET /api/music/content/{id}/stream (original Mux discovery endpoint)
+        for stream_url_candidate in [
+            f"{BASE_URL}/api/music/content/{content_id}/stream",
+            f"{BASE_URL}/api/v3/music/content/{content_id}/stream",
+            f"{BASE_URL}/stream/music/content/{content_id}",
+        ]:
+            try:
+                async with session.get(
+                    stream_url_candidate,
+                    headers=self._auth_headers(),
+                ) as resp:
+                    body = await resp.text()
+                    self.logger.error("24Six: STREAM attempt %s status=%s body=%s",
+                        stream_url_candidate.replace(BASE_URL,""), resp.status, body[:300])
+                    if resp.status == 200:
+                        data = _js.loads(body) if body else {}
+                        mux_url = (data.get("url") or data.get("streamurl") or
+                                   data.get("stream_url") or data.get("hls_url"))
+                        if mux_url:
+                            self.logger.error("24Six: FOUND stream URL via %s: %s",
+                                stream_url_candidate.replace(BASE_URL,""), mux_url[:80])
+                            break
+            except Exception as exc:
+                self.logger.warning("24Six: stream attempt %s failed: %s", stream_url_candidate, exc)
 
-        # The POST /api/v3/music/content/{id} returns track fields directly (no "content" wrapper)
-        # data.get("collection") is the album, not the track
-        mux_url = (
-            data.get("streamurl") or data.get("stream_url") or
-            data.get("url") or data.get("hls_url") or
-            data.get("audio_url") or data.get("signed_url") or
-            data.get("file_url") or data.get("playback_url")
-        )
-
-        # audio_format may be a dict with nested URL
-        if not mux_url and isinstance(data, dict):
-            af = data.get("audio_format")
-            self.logger.info("24Six: audio_format for %s = %s", content_id, str(af)[:400])
-            if isinstance(af, dict):
-                mux_url = (af.get("streamurl") or af.get("url") or af.get("hls_url") or
-                           af.get("stream_url") or af.get("audio_url") or af.get("signed_url") or
-                           af.get("file_url") or af.get("src") or af.get("playback_url"))
-            elif isinstance(af, str) and af.startswith("http"):
-                mux_url = af
+        # Attempt 2: POST /api/v3/music/content/{id} and check audio_format
+        if not mux_url:
+            try:
+                async with session.post(
+                    f"{BASE_URL}/api/v3/music/content/{content_id}",
+                    json={},
+                    headers=self._auth_headers(),
+                ) as resp:
+                    body = await resp.text()
+                    data = _js.loads(body) if body else {}
+                    self.logger.error("24Six: content POST keys=%s audio_format=%s ALL_KEYS=%s",
+                        list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                        str(data.get("audio_format", "MISSING"))[:400],
+                        str(list(data.keys()))[:200])
+                    # Check direct URL fields
+                    mux_url = (data.get("streamurl") or data.get("stream_url") or
+                               data.get("url") or data.get("hls_url") or
+                               data.get("audio_url") or data.get("signed_url") or
+                               data.get("file_url") or data.get("playback_url"))
+                    # Check audio_format nested object
+                    if not mux_url:
+                        af = data.get("audio_format")
+                        if isinstance(af, dict):
+                            mux_url = (af.get("streamurl") or af.get("url") or af.get("hls_url") or
+                                       af.get("stream_url") or af.get("audio_url") or
+                                       af.get("signed_url") or af.get("file_url") or
+                                       af.get("src") or af.get("playback_url"))
+                            self.logger.error("24Six: audio_format dict keys=%s", list(af.keys()))
+                        elif isinstance(af, str) and af.startswith("http"):
+                            mux_url = af
+            except Exception as exc:
+                self.logger.warning("24Six: POST content/%s failed: %s", content_id, exc)
 
         if not mux_url:
+            self.logger.error("24Six: NO STREAM URL FOUND for content_id=%s", content_id)
             raise MediaNotFoundError(
-                f"24Six: no stream URL found for content_id={content_id}. "
-                f"Response: {str(data)[:200]}"
+                f"24Six: no stream URL found for content_id={content_id}"
             )
 
         expiry = _parse_jwt_expiry(mux_url)
@@ -598,12 +624,17 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_stream_details(self, item_id: str, media_item=None) -> StreamDetails:
         """Return HLS stream details for ffmpeg."""
-        self.logger.info("24Six: get_stream_details called for item_id=%s", item_id)
-        mux_url = await self._begin_stream(item_id)
+        self.logger.error("24Six: get_stream_details called for item_id=%s", item_id)
+        try:
+            mux_url = await self._begin_stream(item_id)
+        except Exception as exc:
+            self.logger.error("24Six: _begin_stream FAILED for item_id=%s: %s", item_id, exc)
+            raise
+        self.logger.error("24Six: got stream URL for %s: %s", item_id, mux_url[:80] if mux_url else 'NONE')
         return StreamDetails(
             item_id=item_id,
             provider=self.instance_id,
-            audio_format=AudioFormat(content_type=ContentType.AAC),
+            audio_format=AudioFormat(content_type=ContentType.AAC),  # will be HLS if m3u8 found
             stream_type=StreamType.HTTP,
             path=mux_url,
         )
