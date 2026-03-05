@@ -240,6 +240,7 @@ class TwentyFourSixProvider(MusicProvider):
             f"{BASE_URL}/app/music/search/quick",
             {"q": search_query},
         )
+        self.logger.warning("24Six: quick search raw type=%s len=%s preview=%s", type(raw).__name__, len(raw) if isinstance(raw, (list, dict)) else "n/a", str(raw)[:200])
         if not isinstance(raw, list):
             self.logger.warning("24Six: quick search returned unexpected type %s", type(raw))
             raw = []
