@@ -24,6 +24,7 @@ from music_assistant_models.media_items import (
     Album,
     Artist,
     AudioFormat,
+    BrowseFolder,
     ItemMapping,
     MediaItemImage,
     ProviderMapping,
@@ -33,6 +34,7 @@ from music_assistant_models.media_items import (
 from music_assistant_models.streamdetails import StreamDetails
 
 from music_assistant.constants import CONF_PASSWORD, CONF_USERNAME
+
 from music_assistant.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
@@ -50,6 +52,7 @@ TOKEN_REFRESH_BUFFER = 300
 
 SUPPORTED_FEATURES = {
     ProviderFeature.SEARCH,
+    ProviderFeature.BROWSE,
     ProviderFeature.ARTIST_ALBUMS,
     ProviderFeature.ARTIST_TOPTRACKS,
 }
@@ -183,6 +186,35 @@ class TwentyFourSixProvider(MusicProvider):
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
+    async def _select_profile(self) -> None:
+        """After login, select the user profile via GET /app/profile (returns current profile object)."""
+        session = await self._get_session()
+        xsrf = self._xsrf_header(session)
+        try:
+            # GET /app/profile returns the current profile as a single object
+            async with session.get(f"{BASE_URL}/app/profile", headers=xsrf) as resp:
+                profile = await resp.json(content_type=None)
+
+            # Normalise: could be a list or a single dict
+            if isinstance(profile, list):
+                profile = profile[0] if profile else {}
+
+            if not isinstance(profile, dict) or not profile.get("id"):
+                self.logger.warning("24Six: unexpected profile response: %s", str(profile)[:200])
+                return
+
+            profile_id = profile["id"]
+            profile_name = profile.get("name", "unknown")
+            self.logger.info("24Six: activating profile '%s' (id=%s)", profile_name, profile_id)
+            xsrf = self._xsrf_header(session)
+            async with session.post(
+                f"{BASE_URL}/app/profile/{profile_id}",
+                headers=xsrf,
+            ) as resp:
+                self.logger.info("24Six: profile activation status=%s", resp.status)
+        except aiohttp.ClientError as exc:
+            self.logger.warning("24Six: profile selection failed: %s", exc)
+
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
         """Authenticated GET, auto-retry once on 401."""
         session = await self._get_session()
@@ -225,6 +257,85 @@ class TwentyFourSixProvider(MusicProvider):
             return {}
 
     # ------------------------------------------------------------------
+    # Browse
+    # ------------------------------------------------------------------
+
+    async def browse(self, path: str) -> BrowseFolder:
+        """Browse the 24Six featured homepage, organised by category."""
+        # path == "twentyfoursix://" → root, return category folders
+        # path == "twentyfoursix://category/<cat_id>" → albums in that category
+        parts = path.rstrip("/").split("://", 1)
+        sub = parts[1] if len(parts) > 1 else ""
+
+        # Fetch homepage data (plain XHR JSON, no Inertia header needed)
+        session = await self._get_session()
+        try:
+            async with session.get(
+                f"{BASE_URL}/app/music/featured-homepage"
+            ) as resp:
+                resp.raise_for_status()
+                homepage: list[dict] = await resp.json(content_type=None)
+        except aiohttp.ClientError as exc:
+            self.logger.error("24Six: featured-homepage error: %s", exc)
+            homepage = []
+
+        if not sub:
+            # Root → one folder per category
+            folder = BrowseFolder(
+                item_id="root",
+                provider=self.instance_id,
+                path=path,
+                name="24Six Featured",
+            )
+            for section in homepage:
+                cat = section.get("category", {})
+                cat_id = str(cat.get("id", ""))
+                cat_title = cat.get("title") or cat.get("title_hebrew") or cat_id
+                cat_img = self._img_url(cat.get("img"))
+                sub_folder = BrowseFolder(
+                    item_id=f"category_{cat_id}",
+                    provider=self.instance_id,
+                    path=f"{self.instance_id}://category/{cat_id}",
+                    name=cat_title,
+                )
+                if cat_img:
+                    sub_folder.metadata.images = [
+                        MediaItemImage(type=ImageType.THUMB, path=cat_img, provider=self.instance_id)
+                    ]
+                folder.items.append(sub_folder)
+            return folder
+
+        # Category subfolder → albums for that category
+        if sub.startswith("category/"):
+            cat_id = sub.split("/", 1)[1]
+            cat_name = cat_id
+            albums: list[Album] = []
+            for section in homepage:
+                cat = section.get("category", {})
+                if str(cat.get("id", "")) == cat_id:
+                    cat_name = cat.get("title") or cat_name
+                    for item in section.get("data", []):
+                        if item.get("type") == "collection":
+                            albums.append(self._parse_album(item))
+                    break
+            folder = BrowseFolder(
+                item_id=f"category_{cat_id}",
+                provider=self.instance_id,
+                path=path,
+                name=cat_name,
+            )
+            folder.items.extend(albums)
+            return folder
+
+        # Fallback
+        return BrowseFolder(
+            item_id="root",
+            provider=self.instance_id,
+            path=path,
+            name="24Six",
+        )
+
+    # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
 
@@ -240,7 +351,7 @@ class TwentyFourSixProvider(MusicProvider):
             f"{BASE_URL}/app/music/search/quick",
             {"q": search_query},
         )
-        self.logger.warning("24Six: quick search raw type=%s len=%s preview=%s", type(raw).__name__, len(raw) if isinstance(raw, (list, dict)) else "n/a", str(raw)[:200])
+        self.logger.warning("24Six: quick search raw type=%s len=%s full=%s", type(raw).__name__, len(raw) if isinstance(raw, (list, dict)) else "n/a", str(raw)[:500])
         if not isinstance(raw, list):
             self.logger.warning("24Six: quick search returned unexpected type %s", type(raw))
             raw = []
@@ -367,7 +478,7 @@ class TwentyFourSixProvider(MusicProvider):
                 return mux_url
 
         url = f"{BEGIN_ENDPOINT}/{content_id}/begin"
-        body = {"device_id": self._device_id, "content_type": "music"}
+        body = {"device_id": self._device_id, "interaction": True}
         self.logger.debug("24Six: POST /begin for content_id=%s", content_id)
         data = await self._api_post(url, body)
 
