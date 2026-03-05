@@ -236,31 +236,8 @@ class TwentyFourSixProvider(MusicProvider):
 
 
     async def _select_profile(self) -> None:
-        """Follow browser flow: GET /app/music first, then POST /app/profile."""
-        session = await self._get_session()
-        # Step 1: GET /app/music (browser navigates here after pin-check)
-        try:
-            async with session.get(
-                f"{BASE_URL}/app/music",
-                headers={"Accept": "text/html,application/xhtml+xml", "X-Inertia": "true"},
-                allow_redirects=True,
-            ) as resp:
-                self.logger.info("24Six: GET /app/music status=%s", resp.status)
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: GET /app/music failed: %s", exc)
-
-        # Step 2: POST /app/profile with Referer: /app/music
-        xsrf = self._xsrf_header(session)
-        xsrf["Referer"] = f"{BASE_URL}/app/music"
-        try:
-            async with session.post(
-                f"{BASE_URL}/app/profile",
-                headers=xsrf,
-            ) as resp:
-                body = await resp.text()
-                self.logger.info("24Six: profile status=%s body=%s", resp.status, body[:300])
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: profile selection failed: %s", exc)
+        """Profile is selected via login payload — nothing to do here."""
+        self.logger.info("24Six: profile selected during login, skipping _select_profile")
 
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
         """Authenticated GET, auto-retry once on 401."""
