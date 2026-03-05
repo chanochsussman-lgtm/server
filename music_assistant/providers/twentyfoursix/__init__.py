@@ -555,16 +555,11 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def _begin_stream(self, content_id: str, audio_format: str = "m4a") -> str:
-        """Construct the stream URL exactly as the TfsMediaSource class does in the APK.
+        """Resolve the pre-signed S3/R2 URL by following the 302 redirect from the play endpoint.
 
-        From bytecode disassembly of TfsMediaSource.isIdentifier / invoke:
-          - base: https://24six.app/api/v3/content/
-          - path: {content_id}/play?format={audio_format}
-          - livestream variant: {content_id}/play?livestream=1&format=m3u8
-          - auth: Bearer token in Authorization header (standard _auth_headers)
-
-        The format value comes from the audio_format field in the content POST response
-        ("m4a", "ogg", "m3u8"). Default to "m4a" for music.
+        The play endpoint returns HTTP 302 to a pre-signed Cloudflare R2 URL that is
+        publicly accessible (no auth needed). We return that direct URL so MA/ffmpeg
+        can fetch it natively without any proxy or auth header.
         """
         cached = self._stream_url_cache.get(content_id)
         if cached:
@@ -572,14 +567,31 @@ class TwentyFourSixProvider(MusicProvider):
             if time.time() < expiry - TOKEN_REFRESH_BUFFER:
                 return stream_url
 
-        stream_url = (
+        play_url = (
             f"https://24six.app/api/v3/content/{content_id}"
             f"/play?format={audio_format}"
         )
-        self.logger.info("24Six: constructed stream URL: %s", stream_url)
+        self.logger.info("24Six: resolving stream URL via redirect: %s", play_url)
 
-        # Cache with a 6-hour TTL (URL itself has no expiry token; Bearer auth is per-request)
-        expiry = int(time.time()) + 6 * 3600
+        try:
+            session = await self._get_session()
+            async with session.get(
+                play_url,
+                headers=self._auth_headers(),
+                allow_redirects=False,
+            ) as resp:
+                if resp.status in (301, 302, 303, 307, 308):
+                    stream_url = str(resp.headers.get("location", play_url))
+                    self.logger.info("24Six: resolved to signed URL (length=%s)", len(stream_url))
+                else:
+                    self.logger.warning("24Six: expected redirect but got %s, using play URL", resp.status)
+                    stream_url = play_url
+        except Exception as exc:
+            self.logger.warning("24Six: redirect resolution failed: %s, using play URL", exc)
+            stream_url = play_url
+
+        # S3 signed URLs expire in ~8 hours; cache for 7 to be safe
+        expiry = int(time.time()) + 7 * 3600
         self._stream_url_cache[content_id] = (stream_url, expiry)
         return stream_url
 
@@ -600,7 +612,7 @@ class TwentyFourSixProvider(MusicProvider):
         import json as _js
         audio_fmt = "m4a"
         content_type = ContentType.AAC
-        stream_type = StreamType.CUSTOM
+        stream_type = StreamType.HTTP
 
         try:
             session = await self._get_session()
@@ -639,28 +651,6 @@ class TwentyFourSixProvider(MusicProvider):
             path=stream_url,
         )
 
-    async def get_audio_stream(
-        self, streamdetails: "StreamDetails", seek_position: int = 0
-    ) -> "AsyncGenerator[bytes, None]":
-        """Fetch audio with Bearer auth and yield chunks.
-        Used because ffmpeg cannot pass custom headers; we proxy the auth fetch ourselves.
-        """
-        url = streamdetails.path
-        headers = dict(self._auth_headers())
-        if seek_position:
-            headers["Range"] = f"bytes={seek_position}-"
-        self.logger.info("24Six: get_audio_stream fetching %s seek=%s", url, seek_position)
-        session = await self._get_session()
-        try:
-            async with session.get(url, headers=headers) as resp:
-                self.logger.info("24Six: audio stream status=%s content-type=%s", resp.status, resp.headers.get("content-type"))
-                if resp.status not in (200, 206):
-                    self.logger.error("24Six: audio stream HTTP %s for %s", resp.status, url)
-                    return
-                async for chunk in resp.content.iter_chunked(65536):
-                    yield chunk
-        except Exception as exc:
-            self.logger.error("24Six: audio stream error: %s", exc)
 
     # ------------------------------------------------------------------
     # Data mapping helpers
