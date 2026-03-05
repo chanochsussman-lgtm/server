@@ -228,46 +228,43 @@ class TwentyFourSixProvider(MusicProvider):
     # Browse
     # ------------------------------------------------------------------
 
-    async def browse(self, path: str) -> AsyncGenerator[Album | Artist | Track | BrowseFolder, None]:
+    async def browse(self, path: str) -> list:
         """Browse the 24Six catalog."""
-        # path format: "twentyfoursix://artists", "twentyfoursix://albums", etc.
         parts = path.split("/") if path else []
         section = parts[-1] if parts else ""
 
         if not section or section == self.instance_id:
-            # Root: show top-level folders
-            yield BrowseFolder(
-                item_id="artists",
-                provider=self.instance_id,
-                path=f"{self.instance_id}://artists",
-                name="Artists",
-            )
-            yield BrowseFolder(
-                item_id="albums",
-                provider=self.instance_id,
-                path=f"{self.instance_id}://albums",
-                name="Albums",
-            )
-            yield BrowseFolder(
-                item_id="tracks",
-                provider=self.instance_id,
-                path=f"{self.instance_id}://tracks",
-                name="Tracks",
-            )
-            return
+            return [
+                BrowseFolder(
+                    item_id="artists",
+                    provider=self.instance_id,
+                    path=f"{self.instance_id}://artists",
+                    name="Artists",
+                ),
+                BrowseFolder(
+                    item_id="albums",
+                    provider=self.instance_id,
+                    path=f"{self.instance_id}://albums",
+                    name="Albums",
+                ),
+                BrowseFolder(
+                    item_id="tracks",
+                    provider=self.instance_id,
+                    path=f"{self.instance_id}://tracks",
+                    name="Tracks",
+                ),
+            ]
 
         if section == "artists":
             data = await self._api_get(f"{API_BASE}/music/artists/favorites")
-            for item in data.get("data", []):
-                yield self._parse_artist(item)
-        elif section == "albums":
+            return [self._parse_artist(item) for item in data.get("data", [])]
+        if section == "albums":
             data = await self._api_get(f"{API_BASE}/music/collections/library")
-            for item in data.get("data", []):
-                yield self._parse_album(item)
-        elif section == "tracks":
+            return [self._parse_album(item) for item in data.get("data", [])]
+        if section == "tracks":
             data = await self._api_get(f"{API_BASE}/music/content/favorites")
-            for item in data.get("data", []):
-                yield self._parse_track(item)
+            return [self._parse_track(item) for item in data.get("data", [])]
+        return []
 
     # ------------------------------------------------------------------
     # Search
