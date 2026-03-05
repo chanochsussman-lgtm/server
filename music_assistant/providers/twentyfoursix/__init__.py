@@ -218,6 +218,9 @@ class TwentyFourSixProvider(MusicProvider):
     async def _select_profile(self) -> None:
         """POST /app/profile with empty body to finalize profile selection (browser flow)."""
         session = await self._get_session()
+        # Log all cookies to debug session state
+        cookies = {c.key: c.value[:20] for c in session.cookie_jar}
+        self.logger.info("24Six: cookies before profile POST: %s", list(cookies.keys()))
         xsrf = self._xsrf_header(session)
         try:
             async with session.post(
