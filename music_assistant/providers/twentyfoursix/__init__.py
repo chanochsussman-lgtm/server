@@ -218,7 +218,7 @@ class TwentyFourSixProvider(MusicProvider):
                         self.logger.info("24Six: retry GET %s status=%s body=%s", url.replace(BASE_URL,""), resp2.status, body[:300])
                         return _json.loads(body) if body else {}
                 body = await resp.text()
-                self.logger.info("24Six: GET %s status=%s body=%s", url.replace(BASE_URL,""), resp.status, body[:400])
+                self.logger.info("24Six: GET %s status=%s body=%s", url.replace(BASE_URL,""), resp.status, body[:1500])
                 return _json.loads(body) if body else {}
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: GET %s failed: %s", url, exc)
@@ -229,14 +229,41 @@ class TwentyFourSixProvider(MusicProvider):
         parts = path.split("://", 1)
         sub = parts[1].lstrip("/") if len(parts) > 1 else ""
 
-        # Fetch homepage data via authenticated API
-        raw = await self._api_get(f"{BASE_URL}/api/v3/music")
+        # Fetch homepage data via authenticated POST to /api/v3/music
+        import json as _json3
+        session2 = await self._get_session()
+        raw = {}
+        try:
+            async with session2.post(
+                f"{BASE_URL}/api/v3/music",
+                json={},
+                headers=self._auth_headers(),
+            ) as resp2:
+                body2 = await resp2.text()
+                self.logger.info("24Six: POST /api/v3/music status=%s body=%s", resp2.status, body2[:1500])
+                raw = _json3.loads(body2) if body2 else {}
+        except Exception as exc2:
+            self.logger.warning("24Six: POST /api/v3/music failed: %s", exc2)
+            # Fall back to GET
+            raw = await self._api_get(f"{BASE_URL}/api/v3/music")
+        self.logger.info("24Six: browse raw keys=%s full=%s", 
+            list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+            str(raw)[:1000])
         # v3 API may return {"data": [...]} or a list directly
         homepage: list[dict] = []
         if isinstance(raw, list):
             homepage = raw
         elif isinstance(raw, dict):
-            homepage = raw.get("data") or raw.get("tiles") or raw.get("sections") or []
+            # Try all possible wrapper keys
+            for key in ("data", "tiles", "sections", "results", "content", "items", "music"):
+                val = raw.get(key)
+                if val and isinstance(val, list):
+                    homepage = val
+                    self.logger.info("24Six: browse found content under key=%s count=%s", key, len(val))
+                    break
+            if not homepage:
+                # Maybe the dict itself IS the content map
+                self.logger.info("24Six: browse no list found, raw=%s", str(raw)[:500])
 
         if not sub:
             # Root → one BrowseFolder per category
@@ -284,10 +311,20 @@ class TwentyFourSixProvider(MusicProvider):
     ) -> SearchResults:
         """Search 24Six using the Inertia GET search endpoint."""
         # Try both /api/ and /app/ endpoints to find working one
-        data = await self._api_get(
-            f"{BASE_URL}/api/v3/music/search",
-            params={"q": search_query, "profile_id": 89214},
-        )
+        import json as _json2
+        session = await self._get_session()
+        try:
+            async with session.post(
+                f"{BASE_URL}/api/v3/music/search",
+                json={"q": search_query, "query": search_query},
+                headers=self._auth_headers(),
+            ) as resp:
+                body = await resp.text()
+                self.logger.info("24Six: POST search status=%s body=%s", resp.status, body[:1000])
+                data = _json2.loads(body) if body else {}
+        except Exception as exc:
+            self.logger.warning("24Six: search POST failed: %s", exc)
+            data = {}
 
         # _api_get returns {} on error; Inertia response is {props: {...}}
         # Log first 500 chars of response to diagnose unexpected formats
