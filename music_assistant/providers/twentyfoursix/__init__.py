@@ -144,11 +144,16 @@ class TwentyFourSixProvider(MusicProvider):
                     "Origin": BASE_URL,
                 }
             )
-            # Seed the device_id cookie from the registered browser session
+            # Seed browser session cookies — 24six_session encodes the selected profile (chanoch yosef)
+            # These were captured from a browser session where chanoch yosef was selected
             import yarl as _yarl
+            _url = _yarl.URL(BASE_URL)
             self._session.cookie_jar.update_cookies(
-                {"device_id": "eyJpdiI6IlIvY3IzNWFLRHhkUWJtalZOWTk3SGc9PSIsInZhbHVlIjoiMFpsc2tXU3Y5MHJPUzk5YmRBYVJsby9KZmxlM3VDUGFxOWJHeDVBWmNLdHpUemRSOTdyTzRLRVllSEVRUjN6aWt2aU50clRPUlRCbHZ3dnBHK1lMKzJISzlBSTVzNDV4d3BMaU9KdFBSUmc9IiwibWFjIjoiYWYyYTU1ZTE0YmQ3NzQ1NTM4OWM5M2VlMTA4M2E2MmU1ZmVmN2IyNGJiY2M3OWYyZTVhODU0ZjEyNmZhMmU0OCIsInRhZyI6IiJ9"},
-                _yarl.URL(BASE_URL),
+                {
+                    "device_id": "eyJpdiI6IlIvY3IzNWFLRHhkUWJtalZOWTk3SGc9PSIsInZhbHVlIjoiMFpsc2tXU3Y5MHJPUzk5YmRBYVJsby9KZmxlM3VDUGFxOWJHeDVBWmNLdHpUemRSOTdyTzRLRVllSEVRUjN6aWt2aU50clRPUlRCbHZ3dnBHK1lMKzJISzlBSTVzNDV4d3BMaU9KdFBSUmc9IiwibWFjIjoiYWYyYTU1ZTE0YmQ3NzQ1NTM4OWM5M2VlMTA4M2E2MmU1ZmVmN2IyNGJiY2M3OWYyZTVhODU0ZjEyNmZhMmU0OCIsInRhZyI6IiJ9",
+                    "24six_session": "eyJpdiI6InJ2ZHloRDFVR3Y3N2JDYTNuTFZkT3c9PSIsInZhbHVlIjoiOXBzbXkyNm9yT0NTMlZ4WG8yKzUwcTRQUnZPSnRHWnFrdS91RXdDcG5GRzhIQllQVGRRb3JOVm02Ry9wUTVvOVgrdXViN0NLRmZwRFAwUGFmeU5KQmNTTDQ0U3JMdlVLbytIeWFHaC84VDU1ZXU2cUk4TFhYSktIUTVOV1RoK3kiLCJtYWMiOiI2ZmI0OWNhZTFiOTMwMmJiZDg2NjBiZDk2ZGVjNjk0YTk2YTU2ZDA0N2VkODc2Y2YwMDQwNTE1ZWRlMTdlMThmIiwidGFnIjoiIn0%3D",
+                },
+                _url,
             )
         return self._session
 
@@ -358,9 +363,10 @@ class TwentyFourSixProvider(MusicProvider):
         limit: int = 20,
     ) -> SearchResults:
         """Search 24Six using the Inertia GET search endpoint."""
+        # Try both /api/ and /app/ endpoints to find working one
         data = await self._api_get(
             f"{BASE_URL}/app/music/search",
-            params={"q": search_query},
+            params={"q": search_query, "profile_id": 89214},
         )
 
         # _api_get returns {} on error; Inertia response is {props: {...}}
