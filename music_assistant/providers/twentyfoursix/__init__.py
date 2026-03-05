@@ -236,13 +236,14 @@ class TwentyFourSixProvider(MusicProvider):
                         f"24Six login failed — HTTP {resp.status}. "
                         "Check your username and password."
                     )
-                # Log the session cookie set by login
-                for c in session.cookie_jar:
-                    if c.key == "24six_session":
-                        self.logger.info("24Six: logged in as %s status=%s session=%s", username, resp.status, c.value[:50])
-                        break
-                else:
-                    self.logger.info("24Six: logged in as %s status=%s (no session cookie)", username, resp.status)
+                self.logger.info("24Six: logged in as %s status=%s", username, resp.status)
+                # Override the session cookie with the browser's profile-selected session
+                import yarl as _yarl
+                session.cookie_jar.update_cookies(
+                    {"24six_session": "eyJpdiI6InJ2ZHloRDFVR3Y3N2JDYTNuTFZkT3c9PSIsInZhbHVlIjoiOXBzbXkyNm9yT0NTMlZ4WG8yKzUwcTRQUnZPSnRHWnFrdS91RXdDcG5GRzhIQllQVGRRb3JOVm02Ry9wUTVvOVgrdXViN0NLRmZwRFAwUGFmeU5KQmNTTDQ0U3JMdlVLbytIeWFHaC84VDU1ZXU2cUk4TFhYSktIUTVOV1RoK3kiLCJtYWMiOiI2ZmI0OWNhZTFiOTMwMmJiZDg2NjBiZDk2ZGVjNjk0YTk2YTU2ZDA0N2VkODc2Y2YwMDQwNTE1ZWRlMTdlMThmIiwidGFnIjoiIn0%3D"},
+                    _yarl.URL("https://24six.app"),
+                )
+                self.logger.info("24Six: injected profile-selected session cookie")
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
