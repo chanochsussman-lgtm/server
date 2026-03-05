@@ -525,7 +525,7 @@ class TwentyFourSixProvider(MusicProvider):
                 headers=self._auth_headers(),
             ) as resp:
                 body = await resp.text()
-                self.logger.info("24Six: POST content/%s status=%s body=%s", content_id, resp.status, body[:1500])
+                self.logger.info("24Six: POST content/%s status=%s body=%s", content_id, resp.status, body[:3000])
                 data = _js.loads(body) if body else {}
         except Exception as exc:
             self.logger.warning("24Six: POST content/%s failed: %s", content_id, exc)
@@ -561,7 +561,7 @@ class TwentyFourSixProvider(MusicProvider):
         self._stream_url_cache[content_id] = (mux_url, expiry)
         return mux_url
 
-    async def get_stream_details(self, item_id: str) -> StreamDetails:
+    async def get_stream_details(self, item_id: str, media_item=None) -> StreamDetails:
         """Return HLS stream details for ffmpeg."""
         mux_url = await self._begin_stream(item_id)
         return StreamDetails(
