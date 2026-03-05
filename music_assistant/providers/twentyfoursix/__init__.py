@@ -453,19 +453,33 @@ class TwentyFourSixProvider(MusicProvider):
         return self._parse_artist(artist_data)
 
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
+        # Try the artist detail endpoint first - check multiple possible keys
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
-        # v3: collections is a list directly
-        collections = data.get("collections") or []
+        collections = (data.get("collections") or data.get("artist_albums") or 
+                       data.get("albums") or data.get("latest_collections") or [])
         if isinstance(collections, dict):
             collections = collections.get("tiles") or collections.get("data") or []
+        # If no collections in artist detail, try dedicated collections endpoint
+        if not collections:
+            coll_data = await self._api_get(
+                f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}",
+                params={"include": "collections"}
+            )
+            collections = (coll_data.get("collections") or coll_data.get("artist_albums") or [])
+        self.logger.info("24Six: artist %s albums count=%s", prov_artist_id, len(collections))
         return [self._parse_album(c) for c in collections if isinstance(c, dict)]
 
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
-        # v3: top_songs is a list directly
+        # v3: top_songs is a list or null; "latest" is a single track fallback
         tracks = data.get("top_songs") or data.get("content") or []
         if isinstance(tracks, dict):
             tracks = tracks.get("tiles") or tracks.get("data") or []
+        if not tracks:
+            latest = data.get("latest")
+            if isinstance(latest, dict) and latest.get("id"):
+                tracks = [latest]
+        self.logger.info("24Six: artist %s top tracks count=%s", prov_artist_id, len(tracks))
         return [self._parse_track(t) for t in tracks if isinstance(t, dict)]
 
     # ------------------------------------------------------------------
