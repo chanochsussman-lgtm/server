@@ -105,6 +105,8 @@ class TwentyFourSixProvider(MusicProvider):
 
     _session: aiohttp.ClientSession | None = None
     _device_id: str = ""
+    _bearer_token: str = ""
+    _profile_id: int = 0
     _stream_url_cache: dict[str, tuple[str, int]] = {}
 
     # ------------------------------------------------------------------
@@ -119,7 +121,6 @@ class TwentyFourSixProvider(MusicProvider):
         self._device_id = str(uuid.uuid4())
         self._stream_url_cache = {}
         await self._login()
-        await self._select_profile()
 
     async def unload(self, *args, **kwargs) -> None:
         if self._session and not self._session.closed:
@@ -134,173 +135,116 @@ class TwentyFourSixProvider(MusicProvider):
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    ),
-                    "Accept": "application/json, text/plain, */*",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Origin": BASE_URL,
+                    "User-Agent": "TFS-Android/66.2.6",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "X-DEVICE-ID": self._device_id,
+                    "X-DEVICE-NAME": "Music Assistant",
+                    "platform": "android",
                 }
-            )
-            # Seed browser session cookies — 24six_session encodes the selected profile (chanoch yosef)
-            # These were captured from a browser session where chanoch yosef was selected
-            import yarl as _yarl
-            _url = _yarl.URL(BASE_URL)
-            self._session.cookie_jar.update_cookies(
-                {
-                    "device_id": "eyJpdiI6IlIvY3IzNWFLRHhkUWJtalZOWTk3SGc9PSIsInZhbHVlIjoiMFpsc2tXU3Y5MHJPUzk5YmRBYVJsby9KZmxlM3VDUGFxOWJHeDVBWmNLdHpUemRSOTdyTzRLRVllSEVRUjN6aWt2aU50clRPUlRCbHZ3dnBHK1lMKzJISzlBSTVzNDV4d3BMaU9KdFBSUmc9IiwibWFjIjoiYWYyYTU1ZTE0YmQ3NzQ1NTM4OWM5M2VlMTA4M2E2MmU1ZmVmN2IyNGJiY2M3OWYyZTVhODU0ZjEyNmZhMmU0OCIsInRhZyI6IiJ9",
-                    "24six_session": "eyJpdiI6InJ2ZHloRDFVR3Y3N2JDYTNuTFZkT3c9PSIsInZhbHVlIjoiOXBzbXkyNm9yT0NTMlZ4WG8yKzUwcTRQUnZPSnRHWnFrdS91RXdDcG5GRzhIQllQVGRRb3JOVm02Ry9wUTVvOVgrdXViN0NLRmZwRFAwUGFmeU5KQmNTTDQ0U3JMdlVLbytIeWFHaC84VDU1ZXU2cUk4TFhYSktIUTVOV1RoK3kiLCJtYWMiOiI2ZmI0OWNhZTFiOTMwMmJiZDg2NjBiZDk2ZGVjNjk0YTk2YTU2ZDA0N2VkODc2Y2YwMDQwNTE1ZWRlMTdlMThmIiwidGFnIjoiIn0%3D",
-                },
-                _url,
             )
         return self._session
 
-    def _xsrf_header(self, session: aiohttp.ClientSession) -> dict[str, str]:
-        for cookie in session.cookie_jar:
-            if cookie.key == "XSRF-TOKEN":
-                return {"X-XSRF-TOKEN": urllib.parse.unquote(cookie.value)}
+    def _auth_headers(self) -> dict[str, str]:
+        if self._bearer_token:
+            return {"Authorization": f"Bearer {self._bearer_token}"}
         return {}
 
     async def _login(self) -> None:
-        """Login to 24Six matching exact browser flow:
-        1. GET /login → extract _token from HTML, get XSRF-TOKEN cookie
-        2. POST /check-existing-user with form data (_token, email, password)
-        3. POST /profiles/pin-check with profile_id
-        4. POST /login with JSON credentials + profile
-        """
+        """Login via REST API v3, list profiles, and swap to chanoch yosef."""
+        import json as _json
         username: str = self.config.get_value(CONF_USERNAME)
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
-        # Step 1: GET /login — extract _token and get XSRF-TOKEN cookie
-        import re as _re
-        _token = ""
-        try:
-            async with session.get(
-                f"{BASE_URL}/login",
-                headers={"Accept": "text/html,application/xhtml+xml"},
-            ) as resp:
-                resp.raise_for_status()
-                html = await resp.text()
-                m = _re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
-                if not m:
-                    m = _re.search(r'name="_token"[^>]+value="([^"]+)"', html)
-                if m:
-                    _token = m.group(1)
-                    self.logger.info("24Six: extracted _token length=%s", len(_token))
-                else:
-                    self.logger.warning("24Six: could not find _token in login HTML")
-        except aiohttp.ClientError as exc:
-            raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
-
-        # Step 2: POST /check-existing-user as form data (establishes session)
+        # Step 1: POST /api/v3/login
         try:
             async with session.post(
-                f"{BASE_URL}/check-existing-user",
-                data={"_token": _token, "email": username, "password": password},
-                headers={"Content-Type": "application/x-www-form-urlencoded",
-                         "Accept": "application/json, text/plain, */*",
-                         "X-Requested-With": "XMLHttpRequest"},
+                f"{BASE_URL}/api/v3/login",
+                json={"email": username, "password": password},
             ) as resp:
                 body = await resp.text()
-                self.logger.info("24Six: check-existing-user status=%s body=%s", resp.status, body[:100])
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: check-existing-user failed: %s", exc)
-
-        # Step 3: POST /profiles/pin-check
-        xsrf = self._xsrf_header(session)
-        try:
-            async with session.post(
-                f"{BASE_URL}/profiles/pin-check",
-                json={"profile_id": 89214},
-                headers=xsrf,
-            ) as resp:
-                body = await resp.text()
-                self.logger.info("24Six: pin-check status=%s body=%s", resp.status, body[:100])
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: pin-check failed: %s", exc)
-
-        # Step 4: POST /login with JSON credentials + profile
-        xsrf = self._xsrf_header(session)
-        try:
-            async with session.post(
-                f"{BASE_URL}/login",
-                json={"email": username, "password": password, "profile": 89214, "pin": None},
-                headers=xsrf,
-                allow_redirects=True,
-            ) as resp:
-                if resp.status not in (200, 201, 204, 302):
-                    raise LoginFailed(
-                        f"24Six login failed — HTTP {resp.status}. "
-                        "Check your username and password."
-                    )
-                self.logger.info("24Six: logged in as %s status=%s", username, resp.status)
-                # Override the session cookie with the browser's profile-selected session
-                import yarl as _yarl
-                session.cookie_jar.update_cookies(
-                    {"24six_session": "eyJpdiI6InJ2ZHloRDFVR3Y3N2JDYTNuTFZkT3c9PSIsInZhbHVlIjoiOXBzbXkyNm9yT0NTMlZ4WG8yKzUwcTRQUnZPSnRHWnFrdS91RXdDcG5GRzhIQllQVGRRb3JOVm02Ry9wUTVvOVgrdXViN0NLRmZwRFAwUGFmeU5KQmNTTDQ0U3JMdlVLbytIeWFHaC84VDU1ZXU2cUk4TFhYSktIUTVOV1RoK3kiLCJtYWMiOiI2ZmI0OWNhZTFiOTMwMmJiZDg2NjBiZDk2ZGVjNjk0YTk2YTU2ZDA0N2VkODc2Y2YwMDQwNTE1ZWRlMTdlMThmIiwidGFnIjoiIn0%3D"},
-                    _yarl.URL("https://24six.app"),
+                self.logger.info("24Six: api/v3/login status=%s body=%s", resp.status, body[:400])
+                if resp.status not in (200, 201):
+                    raise LoginFailed(f"24Six login failed HTTP {resp.status}. Check username/password.")
+                data = _json.loads(body)
+                self._bearer_token = (
+                    data.get("token") or
+                    data.get("access_token") or
+                    (data.get("data") or {}).get("token") or
+                    (data.get("data") or {}).get("access_token") or ""
                 )
-                self.logger.info("24Six: injected profile-selected session cookie")
+                self.logger.info("24Six: bearer token length=%s", len(self._bearer_token))
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
+        # Step 2: List profiles
+        for endpoint in ["profile-list", "profile/list"]:
+            try:
+                async with session.get(
+                    f"{BASE_URL}/api/v3/{endpoint}",
+                    headers=self._auth_headers(),
+                ) as resp:
+                    body = await resp.text()
+                    self.logger.info("24Six: %s status=%s body=%s", endpoint, resp.status, body[:400])
+                    if resp.status != 200:
+                        continue
+                    data = _json.loads(body)
+                    profiles = data if isinstance(data, list) else (data.get("data") or data.get("profiles") or [])
+                    for p in (profiles if isinstance(profiles, list) else []):
+                        self.logger.info("24Six: profile id=%s name=%s", p.get("id"), p.get("name"))
+                        if p.get("id") == 89214 or "chanoch" in str(p.get("name", "")).lower():
+                            self._profile_id = int(p.get("id", 89214))
+                            self.logger.info("24Six: target profile id=%s name=%s", self._profile_id, p.get("name"))
+                            break
+                    break
+            except aiohttp.ClientError as exc:
+                self.logger.warning("24Six: %s failed: %s", endpoint, exc)
 
-    async def _select_profile(self) -> None:
-        """Profile is selected via login payload — nothing to do here."""
-        self.logger.info("24Six: profile selected during login, skipping _select_profile")
+        if not self._profile_id:
+            self._profile_id = 89214
+            self.logger.warning("24Six: profile list failed, defaulting to id=89214")
+
+        # Step 3: POST /api/v3/profile/swap
+        try:
+            async with session.post(
+                f"{BASE_URL}/api/v3/profile/swap",
+                json={"profile_id": self._profile_id},
+                headers=self._auth_headers(),
+            ) as resp:
+                body = await resp.text()
+                self.logger.info("24Six: profile/swap status=%s body=%s", resp.status, body[:300])
+                if resp.status == 200:
+                    data = _json.loads(body)
+                    new_token = (
+                        data.get("token") or data.get("access_token") or
+                        (data.get("data") or {}).get("token") or ""
+                    )
+                    if new_token:
+                        self._bearer_token = new_token
+                        self.logger.info("24Six: profile token length=%s", len(self._bearer_token))
+        except aiohttp.ClientError as exc:
+            self.logger.warning("24Six: profile/swap failed: %s", exc)
 
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
-        """Authenticated GET, auto-retry once on 401."""
+        """Authenticated GET against REST API v3."""
+        import json as _json
         session = await self._get_session()
-        # Inertia apps return JSON when X-Inertia header is present
-        # Do NOT send X-Inertia-Version — version mismatch causes a 409 redirect
-        inertia_headers = {
-            "X-Inertia": "true",
-        }
         try:
-            async with session.get(url, params=params, headers=inertia_headers) as resp:
+            async with session.get(url, params=params, headers=self._auth_headers()) as resp:
                 if resp.status == 401:
-                    self.logger.warning("24Six: 401 on GET %s — re-logging in", url)
+                    self.logger.warning("24Six: 401 on %s — re-logging in", url)
                     await self._login()
-                    async with session.get(url, params=params, headers=inertia_headers) as resp2:
-                        resp2.raise_for_status()
-                        return await resp2.json(content_type=None)
+                    async with session.get(url, params=params, headers=self._auth_headers()) as resp2:
+                        body = await resp2.text()
+                        self.logger.info("24Six: retry GET %s status=%s body=%s", url.replace(BASE_URL,""), resp2.status, body[:300])
+                        return _json.loads(body) if body else {}
                 body = await resp.text()
-                self.logger.info("24Six: GET %s status=%s body=%s", url.replace("https://24six.app",""), resp.status, body[:600])
-                import json as _json
-                try:
-                    return _json.loads(body)
-                except Exception:
-                    return {}
+                self.logger.info("24Six: GET %s status=%s body=%s", url.replace(BASE_URL,""), resp.status, body[:400])
+                return _json.loads(body) if body else {}
         except aiohttp.ClientError as exc:
-            self.logger.error("24Six GET error %s: %s", url, exc)
+            self.logger.warning("24Six: GET %s failed: %s", url, exc)
             return {}
-
-    async def _api_post(self, url: str, body: dict) -> dict:
-        """Authenticated POST, auto-retry once on 401."""
-        session = await self._get_session()
-        xsrf = self._xsrf_header(session)
-        try:
-            async with session.post(url, json=body, headers=xsrf) as resp:
-                if resp.status == 401:
-                    self.logger.warning("24Six: 401 on POST %s — re-logging in", url)
-                    await self._login()
-                    xsrf = self._xsrf_header(session)
-                    async with session.post(url, json=body, headers=xsrf) as resp2:
-                        resp2.raise_for_status()
-                        return await resp2.json(content_type=None)
-                resp.raise_for_status()
-                return await resp.json(content_type=None)
-        except aiohttp.ClientError as exc:
-            self.logger.error("24Six POST error %s: %s", url, exc)
-            return {}
-
-    # ------------------------------------------------------------------
-    # Browse
-    # ------------------------------------------------------------------
 
     async def browse(self, path: str) -> list[BrowseFolder | Album]:
         """Browse the 24Six featured homepage, organised by category."""
@@ -312,7 +256,7 @@ class TwentyFourSixProvider(MusicProvider):
         homepage: list[dict] = []
         try:
             async with session.get(
-                f"{BASE_URL}/app/music/featured-homepage"
+                f"{BASE_URL}/api/v3/music"
             ) as resp:
                 resp.raise_for_status()
                 homepage = await resp.json(content_type=None)
@@ -366,7 +310,7 @@ class TwentyFourSixProvider(MusicProvider):
         """Search 24Six using the Inertia GET search endpoint."""
         # Try both /api/ and /app/ endpoints to find working one
         data = await self._api_get(
-            f"{BASE_URL}/app/music/search",
+            f"{BASE_URL}/api/v3/music/search",
             params={"q": search_query, "profile_id": 89214},
         )
 
@@ -419,19 +363,19 @@ class TwentyFourSixProvider(MusicProvider):
         yield  # make this an async generator
 
     async def get_artist(self, prov_artist_id: str) -> Artist:
-        data = await self._api_get(f"{BASE_URL}/app/music/artist/{prov_artist_id}")
+        data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
         artist_data = data.get("props", {}).get("artist") or data
         if not artist_data:
             raise MediaNotFoundError(f"Artist {prov_artist_id} not found on 24Six")
         return self._parse_artist(artist_data)
 
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
-        data = await self._api_get(f"{BASE_URL}/app/music/artist/{prov_artist_id}")
+        data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
         tiles = data.get("props", {}).get("collections", {}).get("tiles", [])
         return [self._parse_album(c) for c in tiles]
 
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
-        data = await self._api_get(f"{BASE_URL}/app/music/artist/{prov_artist_id}")
+        data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
         tiles = data.get("props", {}).get("content", {}).get("tiles", [])
         return [self._parse_track(t) for t in tiles]
 
@@ -444,14 +388,14 @@ class TwentyFourSixProvider(MusicProvider):
         yield  # make this an async generator
 
     async def get_album(self, prov_album_id: str) -> Album:
-        data = await self._api_get(f"{BASE_URL}/app/music/collection/{prov_album_id}")
+        data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
         album_data = data.get("props", {}).get("collection") or data
         if not album_data:
             raise MediaNotFoundError(f"Album {prov_album_id} not found on 24Six")
         return self._parse_album(album_data)
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
-        data = await self._api_get(f"{BASE_URL}/app/music/collection/{prov_album_id}")
+        data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
         props = data.get("props", {})
         tiles = props.get("content", {}).get("tiles", []) or props.get("tracks", [])
         return [self._parse_track(t) for t in tiles]
@@ -465,7 +409,7 @@ class TwentyFourSixProvider(MusicProvider):
         yield  # make this an async generator
 
     async def get_track(self, prov_track_id: str) -> Track:
-        data = await self._api_get(f"{BASE_URL}/app/music/content/{prov_track_id}")
+        data = await self._api_get(f"{BASE_URL}/api/v3/music/content/{prov_track_id}")
         track_data = data.get("props", {}).get("content") or data
         if not track_data:
             raise MediaNotFoundError(f"Track {prov_track_id} not found on 24Six")
