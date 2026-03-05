@@ -639,21 +639,32 @@ class TwentyFourSixProvider(MusicProvider):
             stream_type = StreamType.HLS
         elif audio_fmt == "ogg":
             content_type = ContentType.OGG
-        elif audio_fmt == "m4a":
-            content_type = ContentType.M4A
         else:
-            content_type = ContentType.AAC
+            content_type = ContentType.AAC  # covers m4a and anything else
 
-        stream_url = await self._begin_stream(item_id, audio_fmt)
+        try:
+            stream_url = await self._begin_stream(item_id, audio_fmt)
+        except Exception as exc:
+            import traceback
+            self.logger.error("24Six: _begin_stream failed: %s\n%s", exc, traceback.format_exc())
+            raise
+
         self.logger.info("24Six: streaming %s fmt=%s url=%s", item_id, audio_fmt, stream_url)
 
-        return StreamDetails(
-            item_id=item_id,
-            provider=self.instance_id,
-            audio_format=AudioFormat(content_type=content_type, sample_rate=44100, bit_depth=16, channels=2),
-            stream_type=stream_type,
-            path=stream_url,
-        )
+        try:
+            details = StreamDetails(
+                item_id=item_id,
+                provider=self.instance_id,
+                audio_format=AudioFormat(content_type=content_type),
+                stream_type=stream_type,
+                path=stream_url,
+            )
+        except Exception as exc:
+            import traceback
+            self.logger.error("24Six: StreamDetails() failed: %s\n%s", exc, traceback.format_exc())
+            raise
+
+        return details
 
 
     # ------------------------------------------------------------------
@@ -767,7 +778,7 @@ class TwentyFourSixProvider(MusicProvider):
                     item_id=track_id,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
-                    audio_format=AudioFormat(content_type=ContentType.M4A),
+                    audio_format=AudioFormat(content_type=ContentType.AAC),
                 )
             },
         )
