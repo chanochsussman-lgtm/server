@@ -211,6 +211,10 @@ class TwentyFourSixProvider(MusicProvider):
             ) as resp:
                 body = await resp.text()
                 self.logger.info("24Six: pin-check status=%s body=%s", resp.status, body[:200])
+                # Log session cookie value after pin-check
+                for c in session.cookie_jar:
+                    if c.key == "24six_session":
+                        self.logger.info("24Six: 24six_session after pin-check = %s", c.value[:40])
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: pin-check failed: %s", exc)
 
@@ -218,9 +222,10 @@ class TwentyFourSixProvider(MusicProvider):
     async def _select_profile(self) -> None:
         """POST /app/profile with empty body to finalize profile selection (browser flow)."""
         session = await self._get_session()
-        # Log all cookies to debug session state
-        cookies = {c.key: c.value[:20] for c in session.cookie_jar}
-        self.logger.info("24Six: cookies before profile POST: %s", list(cookies.keys()))
+        # Log session cookie value before profile POST
+        for c in session.cookie_jar:
+            if c.key == "24six_session":
+                self.logger.info("24Six: 24six_session before profile POST = %s", c.value[:40])
         xsrf = self._xsrf_header(session)
         try:
             async with session.post(
@@ -229,6 +234,9 @@ class TwentyFourSixProvider(MusicProvider):
             ) as resp:
                 body = await resp.text()
                 self.logger.info("24Six: profile status=%s body=%s", resp.status, body[:300])
+                for c in session.cookie_jar:
+                    if c.key == "24six_session":
+                        self.logger.info("24Six: 24six_session after profile POST = %s", c.value[:40])
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: profile selection failed: %s", exc)
 
