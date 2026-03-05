@@ -119,6 +119,7 @@ class TwentyFourSixProvider(MusicProvider):
         self._device_id = str(uuid.uuid4())
         self._stream_url_cache = {}
         await self._login()
+        await self._select_profile()
 
     async def unload(self, *args, **kwargs) -> None:
         if self._session and not self._session.closed:
@@ -260,80 +261,55 @@ class TwentyFourSixProvider(MusicProvider):
     # Browse
     # ------------------------------------------------------------------
 
-    async def browse(self, path: str) -> BrowseFolder:
+    async def browse(self, path: str) -> AsyncGenerator[BrowseFolder | Album, None]:
         """Browse the 24Six featured homepage, organised by category."""
-        # path == "twentyfoursix://" → root, return category folders
-        # path == "twentyfoursix://category/<cat_id>" → albums in that category
-        parts = path.rstrip("/").split("://", 1)
-        sub = parts[1] if len(parts) > 1 else ""
+        # path == "<instance_id>//" → root, yield category folders
+        # path == "<instance_id>//category/<cat_id>" → yield albums in that category
+        parts = path.split("://", 1)
+        sub = parts[1].lstrip("/") if len(parts) > 1 else ""
 
         # Fetch homepage data (plain XHR JSON, no Inertia header needed)
         session = await self._get_session()
+        homepage: list[dict] = []
         try:
             async with session.get(
                 f"{BASE_URL}/app/music/featured-homepage"
             ) as resp:
                 resp.raise_for_status()
-                homepage: list[dict] = await resp.json(content_type=None)
+                homepage = await resp.json(content_type=None)
         except aiohttp.ClientError as exc:
             self.logger.error("24Six: featured-homepage error: %s", exc)
-            homepage = []
 
         if not sub:
-            # Root → one folder per category
-            folder = BrowseFolder(
-                item_id="root",
-                provider=self.instance_id,
-                path=path,
-                name="24Six Featured",
-            )
+            # Root → yield one BrowseFolder per category
             for section in homepage:
                 cat = section.get("category", {})
                 cat_id = str(cat.get("id", ""))
                 cat_title = cat.get("title") or cat.get("title_hebrew") or cat_id
                 cat_img = self._img_url(cat.get("img"))
-                sub_folder = BrowseFolder(
+                folder = BrowseFolder(
                     item_id=f"category_{cat_id}",
                     provider=self.instance_id,
                     path=f"{self.instance_id}://category/{cat_id}",
                     name=cat_title,
+                    label=cat_title,
                 )
                 if cat_img:
-                    sub_folder.metadata.images = [
+                    folder.metadata.images = [
                         MediaItemImage(type=ImageType.THUMB, path=cat_img, provider=self.instance_id)
                     ]
-                folder.items.append(sub_folder)
-            return folder
+                yield folder
+            return
 
-        # Category subfolder → albums for that category
+        # Category subfolder → yield albums for that category
         if sub.startswith("category/"):
             cat_id = sub.split("/", 1)[1]
-            cat_name = cat_id
-            albums: list[Album] = []
             for section in homepage:
-                cat = section.get("category", {})
-                if str(cat.get("id", "")) == cat_id:
-                    cat_name = cat.get("title") or cat_name
+                if str(section.get("category", {}).get("id", "")) == cat_id:
                     for item in section.get("data", []):
                         if item.get("type") == "collection":
-                            albums.append(self._parse_album(item))
-                    break
-            folder = BrowseFolder(
-                item_id=f"category_{cat_id}",
-                provider=self.instance_id,
-                path=path,
-                name=cat_name,
-            )
-            folder.items.extend(albums)
-            return folder
-
-        # Fallback
-        return BrowseFolder(
-            item_id="root",
-            provider=self.instance_id,
-            path=path,
-            name="24Six",
-        )
+                            yield self._parse_album(item)
+                    return
 
     # ------------------------------------------------------------------
     # Search
@@ -345,62 +321,26 @@ class TwentyFourSixProvider(MusicProvider):
         media_types: list[MediaType] | None = None,
         limit: int = 20,
     ) -> SearchResults:
-        """Search 24Six using the quick search POST endpoint."""
-        # POST /app/music/search/quick returns [{id, name, type, img}, ...]
-        raw = await self._api_post(
-            f"{BASE_URL}/app/music/search/quick",
-            {"q": search_query},
+        """Search 24Six using the Inertia GET search endpoint."""
+        data = await self._api_get(
+            f"{BASE_URL}/app/music/search",
+            params={"q": search_query},
         )
-        self.logger.warning("24Six: quick search raw type=%s len=%s full=%s", type(raw).__name__, len(raw) if isinstance(raw, (list, dict)) else "n/a", str(raw)[:500])
-        if not isinstance(raw, list):
-            self.logger.warning("24Six: quick search returned unexpected type %s", type(raw))
-            raw = []
+        props = data.get("props", {})
 
         results = SearchResults()
-        for item in raw[:limit]:
-            item_type = item.get("type")
-            item_id = str(item.get("id", ""))
-            name = item.get("name") or "Unknown"
-            img = self._img_url(item.get("img"))
-            images = [MediaItemImage(type=ImageType.THUMB, path=img, provider=self.instance_id)] if img else []
 
-            if item_type == "artist" and (not media_types or MediaType.ARTIST in media_types):
-                artist = Artist(
-                    item_id=item_id,
-                    provider=self.instance_id,
-                    name=name,
-                    provider_mappings={ProviderMapping(item_id=item_id, provider_domain=self.domain, provider_instance=self.instance_id)},
-                )
-                if images:
-                    artist.metadata.images = images
-                results.artists.append(artist)
+        if not media_types or MediaType.ARTIST in media_types:
+            for item in (props.get("artists", {}).get("tiles", []) or [])[:limit]:
+                results.artists.append(self._parse_artist(item))
 
-            elif item_type == "collection" and (not media_types or MediaType.ALBUM in media_types):
-                album = Album(
-                    item_id=item_id,
-                    provider=self.instance_id,
-                    name=name,
-                    provider_mappings={ProviderMapping(item_id=item_id, provider_domain=self.domain, provider_instance=self.instance_id)},
-                )
-                if images:
-                    album.metadata.images = images
-                results.albums.append(album)
+        if not media_types or MediaType.ALBUM in media_types:
+            for item in (props.get("collections", {}).get("tiles", []) or [])[:limit]:
+                results.albums.append(self._parse_album(item))
 
-            elif item_type == "content" and (not media_types or MediaType.TRACK in media_types):
-                track = Track(
-                    item_id=item_id,
-                    provider=self.instance_id,
-                    name=name,
-                    provider_mappings={ProviderMapping(
-                        item_id=item_id,
-                        provider_domain=self.domain,
-                        provider_instance=self.instance_id,
-                        audio_format=AudioFormat(content_type=ContentType.HLS),
-                    )},
-                )
-                if images:
-                    track.metadata.images = images
-                results.tracks.append(track)
+        if not media_types or MediaType.TRACK in media_types:
+            for item in (props.get("content", {}).get("tiles", []) or [])[:limit]:
+                results.tracks.append(self._parse_track(item))
 
         return results
 
