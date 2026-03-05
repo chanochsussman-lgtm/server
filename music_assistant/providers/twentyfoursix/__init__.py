@@ -634,25 +634,6 @@ class TwentyFourSixProvider(MusicProvider):
         except Exception as exc:
             self.logger.warning("24Six: failed to fetch content metadata: %s", exc)
 
-        # Try GET content endpoint as fallback if still defaulting
-        if audio_fmt == "m4a":
-            try:
-                session = await self._get_session()
-                async with session.get(
-                    f"{BASE_URL}/api/v3/content/{item_id}",
-                    headers=self._auth_headers(),
-                ) as resp:
-                    if resp.status == 200:
-                        body = await resp.text()
-                        data = _js.loads(body) if body else {}
-                        raw_fmt = (data.get("audio_format")
-                                   or data.get("content", {}).get("audio_format", "m4a"))
-                        if isinstance(raw_fmt, str) and raw_fmt:
-                            audio_fmt = raw_fmt.lower()
-                        self.logger.info("24Six: GET content fallback audio_format=%r", audio_fmt)
-            except Exception as exc:
-                self.logger.warning("24Six: GET content fallback failed: %s", exc)
-
         # Map audio_format string → ContentType
         if audio_fmt == "m3u8":
             content_type = ContentType.HLS
