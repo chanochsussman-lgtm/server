@@ -179,7 +179,7 @@ class TwentyFourSixProvider(MusicProvider):
         profile_id = None
         try:
             async with session.post(
-                f"{BASE_URL}/app/check-existing-user",
+                f"{BASE_URL}/profiles/check-existing-user",
                 json={"email": username},
                 headers=xsrf,
             ) as resp:
@@ -200,7 +200,7 @@ class TwentyFourSixProvider(MusicProvider):
             xsrf = self._xsrf_header(session)
             try:
                 async with session.post(
-                    f"{BASE_URL}/app/pin-check",
+                    f"{BASE_URL}/profiles/pin-check",
                     json={"profile_id": profile_id},
                     headers=xsrf,
                 ) as resp:
