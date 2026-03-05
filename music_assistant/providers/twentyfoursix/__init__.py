@@ -140,6 +140,8 @@ class TwentyFourSixProvider(MusicProvider):
                     "Content-Type": "application/json",
                     "X-DEVICE-ID": self._device_id,
                     "X-DEVICE-NAME": "Music Assistant",
+                    "X-PLATFORM-KEY": "production-android-44fd2f70",
+                    "X-PLATFORM-DEVICE": "android",
                     "platform": "android",
                 }
             )
