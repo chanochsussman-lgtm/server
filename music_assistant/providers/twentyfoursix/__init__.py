@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 BASE_URL = "https://24six.app"
 API_BASE = f"{BASE_URL}/api"
-BEGIN_ENDPOINT = f"{BASE_URL}/app/content"
+BEGIN_ENDPOINT = f"{BASE_URL}/app/content"  # + /{content_id}/begin
 TOKEN_REFRESH_BUFFER = 300
 
 SUPPORTED_FEATURES = {
@@ -153,14 +153,16 @@ class TwentyFourSixProvider(MusicProvider):
         return {}
 
     async def _login(self) -> None:
-        """Login via REST API v3."""
+        """Login via REST API v3, list profiles, and swap to chanoch yosef."""
         import json as _json
         username: str = self.config.get_value(CONF_USERNAME)
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
+        # Step 1: GET profile list without auth to find profile_id
+        # (login requires profile_id, so we must fetch profiles first)
         if not self._profile_id:
-            self._profile_id = 89214
+            self._profile_id = 89214  # default chanoch yosef
         for endpoint in ["profile-list", "profile/list"]:
             try:
                 async with session.get(
@@ -181,6 +183,7 @@ class TwentyFourSixProvider(MusicProvider):
             except aiohttp.ClientError as exc:
                 self.logger.warning("24Six: pre-auth %s failed: %s", endpoint, exc)
 
+        # Step 2: POST /api/v3/login with profile_id
         try:
             async with session.post(
                 f"{BASE_URL}/api/v3/login",
@@ -240,43 +243,54 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.warning("24Six: POST %s failed: %s", url, exc)
             return {}
 
+    # Dashboard section keys from GET /api/v3/music response
     DASHBOARD_SECTIONS = [
-        ("trending",      "Trending Now 🔥"),
-        ("releases",      "New Releases"),
-        ("featured",      "Featured"),
-        ("newAlbums",     "New Albums"),
-        ("newSingles",    "New Singles"),
-        ("newArtists",    "New Artists"),
-        ("artists",       "Top Artists"),
-        ("playlists",     "Playlists"),
-        ("by24Six",       "By 24Six"),
-        ("recent",        "Recently Added"),
-        ("femaleArtists", "Female Artists"),
-        ("categories",    "Browse Categories"),
+        ("trending",     "Trending Now 🔥"),
+        ("releases",     "New Releases"),
+        ("featured",     "Featured"),
+        ("newAlbums",    "New Albums"),
+        ("newSingles",   "New Singles"),
+        ("newArtists",   "New Artists"),
+        ("artists",      "Top Artists"),
+        ("playlists",    "Playlists"),
+        ("by24Six",      "By 24Six"),
+        ("recent",       "Recently Added"),
+        ("femaleArtists","Female Artists"),
+        ("categories",   "Browse Categories"),
     ]
 
-    _dashboard_cache: dict = {}
+    _dashboard_cache: dict = {}  # cached dashboard response
 
     async def browse(self, path: str) -> list[BrowseFolder | Album | Artist]:
         """Browse 24Six mirroring the app homepage structure."""
         parts = path.split("://", 1)
         sub = parts[1].lstrip("/") if len(parts) > 1 else ""
 
+        # Root: show section folders mirroring app dashboard
         if not sub:
             raw = await self._api_get(f"{BASE_URL}/api/v3/music")
-            self._dashboard_cache = raw
+            self._dashboard_cache = raw  # cache for section drill-downs
             self.logger.info("24Six: dashboard keys=%s", list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__)
+
             items: list[BrowseFolder] = []
             for tile_type, label in self.DASHBOARD_SECTIONS:
                 val = raw.get(tile_type) if isinstance(raw, dict) else None
                 if val is None or (isinstance(val, list) and len(val) == 0):
-                    continue
-                items.append(BrowseFolder(
+                    continue  # skip empty sections
+                # Use first item image as section thumbnail
+                first_img = None
+                if isinstance(val, list) and val:
+                    first = val[0]
+                    first_img = self._img_url(first.get("img") or first.get("image"))
+                folder = BrowseFolder(
                     item_id=f"section_{tile_type}",
                     provider=self.instance_id,
                     path=f"{self.instance_id}://section/{tile_type}",
                     name=label,
-                ))
+                )
+                items.append(folder)
+
+            # Add library
             items.append(BrowseFolder(
                 item_id="section_library",
                 provider=self.instance_id,
@@ -285,27 +299,34 @@ class TwentyFourSixProvider(MusicProvider):
             ))
             return items
 
+        # Section drill-down: use cached dashboard data
         if sub.startswith("section/"):
             tile_type = sub.split("/", 1)[1]
+
             if tile_type == "library":
                 raw = await self._api_get(f"{BASE_URL}/api/v3/music/library")
                 data = raw if isinstance(raw, list) else raw.get("data") or raw.get("items") or []
             elif tile_type == "categories":
+                # categories section contains category objects
                 data = self._dashboard_cache.get("categories") or []
                 if not data:
                     raw = await self._api_get(f"{BASE_URL}/api/v3/music/category")
                     data = raw if isinstance(raw, list) else raw.get("data") or []
             else:
+                # Use cached dashboard data - all sections are in the main response
                 data = self._dashboard_cache.get(tile_type)
                 if data is None:
+                    # Refresh dashboard cache
                     raw = await self._api_get(f"{BASE_URL}/api/v3/music")
                     self._dashboard_cache = raw
                     data = raw.get(tile_type) or []
 
-            self.logger.info("24Six: section/%s count=%s", tile_type, len(data) if isinstance(data, list) else "?")
+            self.logger.info("24Six: section/%s count=%s first=%s", tile_type, len(data) if isinstance(data, list) else "?", str(data[0] if isinstance(data, list) and data else data)[:200])
+
             results: list = []
             if not isinstance(data, list):
                 return results
+
             for item in data:
                 if not isinstance(item, dict):
                     continue
@@ -317,22 +338,27 @@ class TwentyFourSixProvider(MusicProvider):
                 elif item_type in ("content", "track", "song"):
                     results.append(self._parse_track(item))
                 elif item_type == "category":
-                    results.append(BrowseFolder(
+                    folder = BrowseFolder(
                         item_id=f"category_{item.get('id')}",
                         provider=self.instance_id,
                         path=f"{self.instance_id}://category/{item.get('id')}",
                         name=item.get("title") or item.get("name") or str(item.get("id")),
-                    ))
+                    )
+                    results.append(folder)
                 elif item_type == "playlist":
                     results.append(self._parse_album(item))
                 else:
+                    # Guess from fields
                     if "img" in item and "title" in item:
                         results.append(self._parse_album(item))
+
             return results
 
+        # Category sub-drill: /section/category/{id}
         if sub.startswith("section/category/"):
             cat_id = sub.split("/")[2]
             raw = await self._api_get(f"{BASE_URL}/api/v3/music/category", params={"id": cat_id})
+            self.logger.info("24Six: category/%s snippet=%s", cat_id, str(raw)[:600])
             data = raw if isinstance(raw, list) else raw.get("data") or raw.get("tiles") or []
             return [self._parse_album(item) for item in data if isinstance(item, dict)]
 
@@ -348,7 +374,8 @@ class TwentyFourSixProvider(MusicProvider):
         media_types: list[MediaType] | None = None,
         limit: int = 20,
     ) -> SearchResults:
-        """Search 24Six."""
+        """Search 24Six using the Inertia GET search endpoint."""
+        # Try both /api/ and /app/ endpoints to find working one
         import json as _json2
         session = await self._get_session()
         try:
@@ -364,31 +391,48 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.warning("24Six: search POST failed: %s", exc)
             data = {}
 
+        # _api_get returns {} on error; Inertia response is {props: {...}}
+        # Log first 500 chars of response to diagnose unexpected formats
+        self.logger.info("24Six: search raw type=%s keys=%s snippet=%s",
+            type(data).__name__,
+            list(data.keys()) if isinstance(data, dict) else "n/a",
+            str(data)[:500],
+        )
         if not isinstance(data, dict):
+            self.logger.warning("24Six: search returned unexpected type %s", type(data).__name__)
             return SearchResults()
+
+        # v3 API: {"artists": [...], "collections": [...], "tiles": [...]}
+        # or wrapped: {"data": {"artists": [...], ...}}
         props = data
         if "data" in data and isinstance(data["data"], dict):
             props = data["data"]
 
         results = SearchResults()
+
         if not media_types or MediaType.ARTIST in media_types:
             tiles = props.get("artists", [])
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", []) or tiles.get("data", [])
             for item in (tiles or [])[:limit]:
                 results.artists.append(self._parse_artist(item))
+
         if not media_types or MediaType.ALBUM in media_types:
+            # API returns both 'collections' and 'albums'
             tiles = props.get("collections") or props.get("albums") or []
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", [])
             for item in (tiles or [])[:limit]:
                 results.albums.append(self._parse_album(item))
+
         if not media_types or MediaType.TRACK in media_types:
+            # API returns tracks under 'songs' or 'content'
             tiles = props.get("songs") or props.get("content") or []
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", []) or tiles.get("data", [])
             for item in (tiles or [])[:limit]:
                 results.tracks.append(self._parse_track(item))
+
         return results
 
     # ------------------------------------------------------------------
@@ -397,21 +441,24 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         return
-        yield
+        yield  # make this an async generator
 
     async def get_artist(self, prov_artist_id: str) -> Artist:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
+        # v3: {"artist": {...}, "top_songs": [...], "collections": [...]}
         artist_data = data.get("artist") or data
         if not artist_data or not artist_data.get("id"):
             raise MediaNotFoundError(f"Artist {prov_artist_id} not found on 24Six")
         return self._parse_artist(artist_data)
 
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
+        # Try the artist detail endpoint first - check multiple possible keys
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
-        collections = (data.get("collections") or data.get("artist_albums") or
+        collections = (data.get("collections") or data.get("artist_albums") or 
                        data.get("albums") or data.get("latest_collections") or [])
         if isinstance(collections, dict):
             collections = collections.get("tiles") or collections.get("data") or []
+        # If no collections in artist detail, try dedicated collections endpoint
         if not collections:
             coll_data = await self._api_get(
                 f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}",
@@ -423,6 +470,7 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
+        # v3: top_songs is a list or null; "latest" is a single track fallback
         tracks = data.get("top_songs") or data.get("content") or []
         if isinstance(tracks, dict):
             tracks = tracks.get("tiles") or tracks.get("data") or []
@@ -439,10 +487,11 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         return
-        yield
+        yield  # make this an async generator
 
     async def get_album(self, prov_album_id: str) -> Album:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
+        # v3: {"collection": {...}, "content": [...]}
         album_data = data.get("collection") or data
         if not album_data or not album_data.get("id"):
             raise MediaNotFoundError(f"Album {prov_album_id} not found on 24Six")
@@ -450,9 +499,12 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
+        # v3: collection endpoint returns {"collection": {...}, "contents": [...]}
+        # Note: "contents" not "content"!
         collection_meta = data.get("collection") or {}
         tracks = (data.get("contents") or data.get("content") or
-                  data.get("tracks") or collection_meta.get("contents") or [])
+                  data.get("tracks") or
+                  collection_meta.get("contents") or [])
         if isinstance(tracks, dict):
             tracks = tracks.get("tiles") or tracks.get("data") or []
         self.logger.error("24Six: album %s tracks count=%s", prov_album_id, len(tracks))
@@ -460,6 +512,7 @@ class TwentyFourSixProvider(MusicProvider):
         for t in tracks:
             if not isinstance(t, dict):
                 continue
+            # Inject collection info so track always has album reference
             if not t.get("collection") and collection_meta.get("id"):
                 t = {**t, "collection": collection_meta}
             result.append(self._parse_track(t))
@@ -471,10 +524,10 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
         return
-        yield
+        yield  # make this an async generator
 
     async def get_track(self, prov_track_id: str) -> Track:
-        """Fetch single track metadata."""
+        """Fetch single track metadata. POST /api/v3/music/content/{id} returns track directly."""
         import json as _jt
         session = await self._get_session()
         try:
@@ -490,6 +543,8 @@ class TwentyFourSixProvider(MusicProvider):
                 data = _jt.loads(body) if body else {}
         except Exception as exc:
             raise MediaNotFoundError(f"Track {prov_track_id} fetch failed: {exc}") from exc
+        # The POST returns the track directly at top level (id, title, artist_id, ...)
+        # NOT wrapped in a "content" key
         track_data = data if data.get("id") else (data.get("content") or data)
         if not track_data or not track_data.get("id"):
             raise MediaNotFoundError(f"Track {prov_track_id} not found on 24Six")
@@ -500,7 +555,17 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def _begin_stream(self, content_id: str, audio_format: str = "m4a") -> str:
-        """Construct stream URL per TfsMediaSource APK bytecode."""
+        """Construct the stream URL exactly as the TfsMediaSource class does in the APK.
+
+        From bytecode disassembly of TfsMediaSource.isIdentifier / invoke:
+          - base: https://24six.app/api/v3/content/
+          - path: {content_id}/play?format={audio_format}
+          - livestream variant: {content_id}/play?livestream=1&format=m3u8
+          - auth: Bearer token in Authorization header (standard _auth_headers)
+
+        The format value comes from the audio_format field in the content POST response
+        ("m4a", "ogg", "m3u8"). Default to "m4a" for music.
+        """
         cached = self._stream_url_cache.get(content_id)
         if cached:
             stream_url, expiry = cached
@@ -513,18 +578,29 @@ class TwentyFourSixProvider(MusicProvider):
         )
         self.logger.info("24Six: constructed stream URL: %s", stream_url)
 
+        # Cache with a 6-hour TTL (URL itself has no expiry token; Bearer auth is per-request)
         expiry = int(time.time()) + 6 * 3600
         self._stream_url_cache[content_id] = (stream_url, expiry)
         return stream_url
 
+
     async def get_stream_details(self, item_id: str, media_item=None) -> StreamDetails:
-        """Return stream details with Bearer auth header passed to ffmpeg via http_headers."""
+        """Return stream details. URL is constructed locally per TfsMediaSource APK bytecode.
+
+        The APK builds the URL as:
+          https://24six.app/api/v3/content/{id}/play?format={audio_format}
+        Auth is the standard Bearer token in the request header.
+
+        We fetch the content metadata first to get the audio_format field
+        ("m4a", "ogg", "m3u8"), then construct the URL and set the correct MIME type.
+        """
         self.logger.info("24Six: get_stream_details called for item_id=%s", item_id)
 
+        # Fetch content metadata to determine audio_format
         import json as _js
         audio_fmt = "m4a"
         content_type = ContentType.AAC
-        stream_type = StreamType.HTTP
+        stream_type = StreamType.CUSTOM
 
         try:
             session = await self._get_session()
@@ -543,13 +619,14 @@ class TwentyFourSixProvider(MusicProvider):
         except Exception as exc:
             self.logger.warning("24Six: failed to fetch content metadata: %s", exc)
 
+        # Map audio_format string → ContentType
         if audio_fmt == "m3u8":
             content_type = ContentType.HLS
             stream_type = StreamType.HLS
         elif audio_fmt == "ogg":
             content_type = ContentType.OGG
         else:
-            content_type = ContentType.AAC
+            content_type = ContentType.AAC  # m4a / aac
 
         stream_url = await self._begin_stream(item_id, audio_fmt)
         self.logger.info("24Six: streaming %s fmt=%s url=%s", item_id, audio_fmt, stream_url)
@@ -560,8 +637,30 @@ class TwentyFourSixProvider(MusicProvider):
             audio_format=AudioFormat(content_type=content_type),
             stream_type=stream_type,
             path=stream_url,
-            http_headers={"Authorization": f"Bearer {self._bearer_token}"},
         )
+
+    async def get_audio_stream(
+        self, streamdetails: "StreamDetails", seek_position: int = 0
+    ) -> "AsyncGenerator[bytes, None]":
+        """Fetch audio with Bearer auth and yield chunks.
+        Used because ffmpeg cannot pass custom headers; we proxy the auth fetch ourselves.
+        """
+        url = streamdetails.path
+        headers = dict(self._auth_headers())
+        if seek_position:
+            headers["Range"] = f"bytes={seek_position}-"
+        self.logger.info("24Six: get_audio_stream fetching %s seek=%s", url, seek_position)
+        session = await self._get_session()
+        try:
+            async with session.get(url, headers=headers) as resp:
+                self.logger.info("24Six: audio stream status=%s content-type=%s", resp.status, resp.headers.get("content-type"))
+                if resp.status not in (200, 206):
+                    self.logger.error("24Six: audio stream HTTP %s for %s", resp.status, url)
+                    return
+                async for chunk in resp.content.iter_chunked(65536):
+                    yield chunk
+        except Exception as exc:
+            self.logger.error("24Six: audio stream error: %s", exc)
 
     # ------------------------------------------------------------------
     # Data mapping helpers
@@ -634,6 +733,7 @@ class TwentyFourSixProvider(MusicProvider):
     def _parse_track(self, data: dict) -> Track:
         track_id = str(data.get("id") or data.get("content_id") or "")
         collection = data.get("collection") or {}
+        # Build artists list - top_songs has artist_id + subtitle instead of artists array
         raw_artists = data.get("artists") or []
         if not raw_artists and data.get("artist_id"):
             raw_artists = [{"id": data["artist_id"], "name": data.get("subtitle", "").split(",")[0].strip() or "Unknown"}]
