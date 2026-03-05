@@ -255,8 +255,10 @@ class TwentyFourSixProvider(MusicProvider):
                     async with session.get(url, params=params, headers=inertia_headers) as resp2:
                         resp2.raise_for_status()
                         return await resp2.json(content_type=None)
-                resp.raise_for_status()
-                return await resp.json(content_type=None)
+                body = await resp.text()
+                self.logger.info("24Six: GET %s status=%s body=%s", url.replace("https://24six.app",""), resp.status, body[:400])
+                import json as _json
+                return _json.loads(body)
         except aiohttp.ClientError as exc:
             self.logger.error("24Six GET error %s: %s", url, exc)
             return {}
@@ -356,7 +358,7 @@ class TwentyFourSixProvider(MusicProvider):
         self.logger.info("24Six: search raw type=%s keys=%s snippet=%s",
             type(data).__name__,
             list(data.keys()) if isinstance(data, dict) else "n/a",
-            str(data)[:300],
+            str(data)[:500],
         )
         if not isinstance(data, dict):
             self.logger.warning("24Six: search returned unexpected type %s", type(data).__name__)
