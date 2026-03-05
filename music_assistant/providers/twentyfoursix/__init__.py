@@ -555,10 +555,10 @@ class TwentyFourSixProvider(MusicProvider):
         # The POST /api/v3/music/content/{id} returns track fields directly (no "content" wrapper)
         # data.get("collection") is the album, not the track
         mux_url = (
-            data.get("url") or data.get("stream_url") or
-            data.get("hls_url") or data.get("audio_url") or
-            data.get("signed_url") or data.get("file_url") or
-            data.get("playback_url")
+            data.get("streamurl") or data.get("stream_url") or
+            data.get("url") or data.get("hls_url") or
+            data.get("audio_url") or data.get("signed_url") or
+            data.get("file_url") or data.get("playback_url")
         )
 
         # audio_format may be a dict with nested URL
@@ -566,9 +566,9 @@ class TwentyFourSixProvider(MusicProvider):
             af = data.get("audio_format")
             self.logger.info("24Six: audio_format for %s = %s", content_id, str(af)[:400])
             if isinstance(af, dict):
-                mux_url = (af.get("url") or af.get("hls_url") or af.get("stream_url") or
-                           af.get("audio_url") or af.get("signed_url") or af.get("file_url") or
-                           af.get("src") or af.get("playback_url"))
+                mux_url = (af.get("streamurl") or af.get("url") or af.get("hls_url") or
+                           af.get("stream_url") or af.get("audio_url") or af.get("signed_url") or
+                           af.get("file_url") or af.get("src") or af.get("playback_url"))
             elif isinstance(af, str) and af.startswith("http"):
                 mux_url = af
 
@@ -698,7 +698,6 @@ class TwentyFourSixProvider(MusicProvider):
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
                     audio_format=AudioFormat(content_type=ContentType.AAC),
-                    url=data.get("preview_url"),
                 )
             },
         )
