@@ -160,7 +160,7 @@ class TwentyFourSixProvider(MusicProvider):
         session = await self._get_session()
 
         if not self._profile_id:
-            self._profile_id = 89214  # default chanoch yosef
+            self._profile_id = 89214
         for endpoint in ["profile-list", "profile/list"]:
             try:
                 async with session.get(
@@ -266,20 +266,17 @@ class TwentyFourSixProvider(MusicProvider):
             raw = await self._api_get(f"{BASE_URL}/api/v3/music")
             self._dashboard_cache = raw
             self.logger.info("24Six: dashboard keys=%s", list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__)
-
             items: list[BrowseFolder] = []
             for tile_type, label in self.DASHBOARD_SECTIONS:
                 val = raw.get(tile_type) if isinstance(raw, dict) else None
                 if val is None or (isinstance(val, list) and len(val) == 0):
                     continue
-                folder = BrowseFolder(
+                items.append(BrowseFolder(
                     item_id=f"section_{tile_type}",
                     provider=self.instance_id,
                     path=f"{self.instance_id}://section/{tile_type}",
                     name=label,
-                )
-                items.append(folder)
-
+                ))
             items.append(BrowseFolder(
                 item_id="section_library",
                 provider=self.instance_id,
@@ -290,7 +287,6 @@ class TwentyFourSixProvider(MusicProvider):
 
         if sub.startswith("section/"):
             tile_type = sub.split("/", 1)[1]
-
             if tile_type == "library":
                 raw = await self._api_get(f"{BASE_URL}/api/v3/music/library")
                 data = raw if isinstance(raw, list) else raw.get("data") or raw.get("items") or []
@@ -306,12 +302,10 @@ class TwentyFourSixProvider(MusicProvider):
                     self._dashboard_cache = raw
                     data = raw.get(tile_type) or []
 
-            self.logger.info("24Six: section/%s count=%s first=%s", tile_type, len(data) if isinstance(data, list) else "?", str(data[0] if isinstance(data, list) and data else data)[:200])
-
+            self.logger.info("24Six: section/%s count=%s", tile_type, len(data) if isinstance(data, list) else "?")
             results: list = []
             if not isinstance(data, list):
                 return results
-
             for item in data:
                 if not isinstance(item, dict):
                     continue
@@ -334,13 +328,11 @@ class TwentyFourSixProvider(MusicProvider):
                 else:
                     if "img" in item and "title" in item:
                         results.append(self._parse_album(item))
-
             return results
 
         if sub.startswith("section/category/"):
             cat_id = sub.split("/")[2]
             raw = await self._api_get(f"{BASE_URL}/api/v3/music/category", params={"id": cat_id})
-            self.logger.info("24Six: category/%s snippet=%s", cat_id, str(raw)[:600])
             data = raw if isinstance(raw, list) else raw.get("data") or raw.get("tiles") or []
             return [self._parse_album(item) for item in data if isinstance(item, dict)]
 
@@ -372,42 +364,31 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.warning("24Six: search POST failed: %s", exc)
             data = {}
 
-        self.logger.info("24Six: search raw type=%s keys=%s snippet=%s",
-            type(data).__name__,
-            list(data.keys()) if isinstance(data, dict) else "n/a",
-            str(data)[:500],
-        )
         if not isinstance(data, dict):
-            self.logger.warning("24Six: search returned unexpected type %s", type(data).__name__)
             return SearchResults()
-
         props = data
         if "data" in data and isinstance(data["data"], dict):
             props = data["data"]
 
         results = SearchResults()
-
         if not media_types or MediaType.ARTIST in media_types:
             tiles = props.get("artists", [])
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", []) or tiles.get("data", [])
             for item in (tiles or [])[:limit]:
                 results.artists.append(self._parse_artist(item))
-
         if not media_types or MediaType.ALBUM in media_types:
             tiles = props.get("collections") or props.get("albums") or []
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", [])
             for item in (tiles or [])[:limit]:
                 results.albums.append(self._parse_album(item))
-
         if not media_types or MediaType.TRACK in media_types:
             tiles = props.get("songs") or props.get("content") or []
             if isinstance(tiles, dict):
                 tiles = tiles.get("tiles", []) or tiles.get("data", [])
             for item in (tiles or [])[:limit]:
                 results.tracks.append(self._parse_track(item))
-
         return results
 
     # ------------------------------------------------------------------
@@ -471,8 +452,7 @@ class TwentyFourSixProvider(MusicProvider):
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
         collection_meta = data.get("collection") or {}
         tracks = (data.get("contents") or data.get("content") or
-                  data.get("tracks") or
-                  collection_meta.get("contents") or [])
+                  data.get("tracks") or collection_meta.get("contents") or [])
         if isinstance(tracks, dict):
             tracks = tracks.get("tiles") or tracks.get("data") or []
         self.logger.error("24Six: album %s tracks count=%s", prov_album_id, len(tracks))
@@ -520,36 +500,25 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def _begin_stream(self, content_id: str, audio_format: str = "m4a") -> str:
-        """Construct stream URL per TfsMediaSource APK bytecode, with token embedded
-        so ffmpeg can fetch it directly without custom auth headers.
-        """
+        """Construct stream URL per TfsMediaSource APK bytecode."""
         cached = self._stream_url_cache.get(content_id)
         if cached:
             stream_url, expiry = cached
             if time.time() < expiry - TOKEN_REFRESH_BUFFER:
                 return stream_url
 
-        # Embed Bearer token as query param — ffmpeg fetches the URL directly
-        # and doesn't send custom headers, so auth must be in the URL itself.
         stream_url = (
             f"https://24six.app/api/v3/content/{content_id}"
-            f"/play?format={audio_format}&token={self._bearer_token}"
+            f"/play?format={audio_format}"
         )
-        self.logger.info(
-            "24Six: constructed stream URL: https://24six.app/api/v3/content/%s/play?format=%s&token=<redacted>",
-            content_id, audio_format
-        )
+        self.logger.info("24Six: constructed stream URL: %s", stream_url)
 
         expiry = int(time.time()) + 6 * 3600
         self._stream_url_cache[content_id] = (stream_url, expiry)
         return stream_url
 
     async def get_stream_details(self, item_id: str, media_item=None) -> StreamDetails:
-        """Return stream details. URL constructed per TfsMediaSource APK bytecode.
-
-        Fetches content metadata to get audio_format ("m4a", "ogg", "m3u8"), then builds:
-          https://24six.app/api/v3/content/{id}/play?format={audio_format}&token={bearer}
-        """
+        """Return stream details with Bearer auth header passed to ffmpeg via http_headers."""
         self.logger.info("24Six: get_stream_details called for item_id=%s", item_id)
 
         import json as _js
@@ -583,7 +552,7 @@ class TwentyFourSixProvider(MusicProvider):
             content_type = ContentType.AAC
 
         stream_url = await self._begin_stream(item_id, audio_fmt)
-        self.logger.info("24Six: streaming %s fmt=%s", item_id, audio_fmt)
+        self.logger.info("24Six: streaming %s fmt=%s url=%s", item_id, audio_fmt, stream_url)
 
         return StreamDetails(
             item_id=item_id,
@@ -591,6 +560,7 @@ class TwentyFourSixProvider(MusicProvider):
             audio_format=AudioFormat(content_type=content_type),
             stream_type=stream_type,
             path=stream_url,
+            http_headers={"Authorization": f"Bearer {self._bearer_token}"},
         )
 
     # ------------------------------------------------------------------
