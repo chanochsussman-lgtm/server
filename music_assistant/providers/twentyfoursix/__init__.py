@@ -158,18 +158,16 @@ class TwentyFourSixProvider(MusicProvider):
         return {}
 
     async def _login(self) -> None:
-        """Login to 24Six matching the full browser flow:
-        1. GET /login → CSRF token from HTML
-        2. POST /profiles/pin-check with profile_id=89214
-        3. POST /login with credentials
+        """Login to 24Six:
+        1. GET /login → obtain XSRF-TOKEN cookie
+        2. POST /login with credentials + profile selection
         """
         username: str = self.config.get_value(CONF_USERNAME)
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
-        # Step 1: GET /login to obtain XSRF-TOKEN cookie and extract _token from HTML
+        # Step 1: GET /login to obtain XSRF-TOKEN cookie
         import re as _re
-        _token = ""
         try:
             async with session.get(
                 f"{BASE_URL}/login",
@@ -177,31 +175,11 @@ class TwentyFourSixProvider(MusicProvider):
             ) as resp:
                 resp.raise_for_status()
                 html = await resp.text()
-                m = _re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
-                if not m:
-                    m = _re.search(r'name="_token"[^>]+value="([^"]+)"', html)
-                if m:
-                    _token = m.group(1)
-                    self.logger.info("24Six: extracted _token length=%s", len(_token))
-                else:
-                    self.logger.warning("24Six: could not find _token in login HTML")
+                self.logger.info("24Six: GET /login status=%s", resp.status)
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
 
-        # Step 2: POST /profiles/pin-check (select profile before login)
-        xsrf = self._xsrf_header(session)
-        try:
-            async with session.post(
-                f"{BASE_URL}/profiles/pin-check",
-                json={"profile_id": 89214},
-                headers=xsrf,
-            ) as resp:
-                body = await resp.text()
-                self.logger.info("24Six: pin-check status=%s body=%s", resp.status, body[:100])
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: pin-check failed: %s", exc)
-
-        # Step 3: POST /login with credentials AND profile embedded
+        # Step 2: POST /login with credentials and profile embedded (exact browser payload)
         xsrf = self._xsrf_header(session)
         try:
             async with session.post(
