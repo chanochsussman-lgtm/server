@@ -545,13 +545,10 @@ class TwentyFourSixProvider(MusicProvider):
             ) as resp:
                 body = await resp.text()
                 data = _js.loads(body) if body else {}
-                self.logger.info("24Six: POST content/%s status=%s keys=%s url_fields=%s", 
+                self.logger.info("24Six: POST content/%s status=%s keys=%s audio_format=%s", 
                     content_id, resp.status, 
                     list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-                    {k: str(v)[:80] for k, v in (data if isinstance(data, dict) else {}).items() 
-                     if k in ("url","stream_url","hls_url","audio_url","signed_url","file_url",
-                               "playback_url","media_url","token","stream","play_url","src","source",
-                               "streaming_url","audio","download_url","cdn_url","signed","hls","m3u8")})
+                    str(data.get("audio_format", "MISSING"))[:300])
         except Exception as exc:
             self.logger.warning("24Six: POST content/%s failed: %s", content_id, exc)
 
@@ -563,18 +560,16 @@ class TwentyFourSixProvider(MusicProvider):
             content_data.get("playback_url")
         )
 
-        if not mux_url:
-            # Step 2: Try old /app/content/{id}/begin endpoint
-            url = f"{BEGIN_ENDPOINT}/{content_id}/begin"
-            begin_data = await self._api_post(url, {"device_id": self._device_id, "interaction": True})
-            self.logger.info("24Six: /begin response keys=%s snippet=%s",
-                list(begin_data.keys()) if isinstance(begin_data, dict) else type(begin_data).__name__,
-                str(begin_data)[:400])
-            mux_url = (
-                begin_data.get("url") or begin_data.get("stream_url") or begin_data.get("hls_url") or
-                begin_data.get("audio_url") or begin_data.get("signed_url") or
-                (begin_data.get("data") or {}).get("url")
-            )
+        # audio_format may be a dict with nested URL
+        if not mux_url and isinstance(data, dict):
+            af = data.get("audio_format")
+            self.logger.info("24Six: audio_format for %s = %s", content_id, str(af)[:400])
+            if isinstance(af, dict):
+                mux_url = (af.get("url") or af.get("hls_url") or af.get("stream_url") or
+                           af.get("audio_url") or af.get("signed_url") or af.get("file_url") or
+                           af.get("src") or af.get("playback_url"))
+            elif isinstance(af, str) and af.startswith("http"):
+                mux_url = af
 
         if not mux_url:
             raise MediaNotFoundError(
