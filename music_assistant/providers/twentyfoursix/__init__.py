@@ -217,17 +217,22 @@ class TwentyFourSixProvider(MusicProvider):
 
 
     async def _select_profile(self) -> None:
-        """POST to /profiles/select to finalize profile selection after pin-check."""
+        """GET /profiles/select to finalize profile selection after pin-check."""
         session = await self._get_session()
-        xsrf = self._xsrf_header(session)
         try:
-            async with session.post(
-                f"{BASE_URL}/profiles/select",
-                json={"profile_id": 89214},
-                headers=xsrf,
-            ) as resp:
-                body = await resp.text()
-                self.logger.info("24Six: profiles/select status=%s body=%s", resp.status, body[:300])
+            # Try with profile_id param, then without
+            for params in [{"profile_id": 89214}, {"id": 89214}, None]:
+                async with session.get(
+                    f"{BASE_URL}/profiles/select",
+                    params=params,
+                    headers={"Accept": "text/html,application/xhtml+xml"},
+                    allow_redirects=False,
+                ) as resp:
+                    body = await resp.text()
+                    self.logger.info("24Six: profiles/select params=%s status=%s location=%s body=%s",
+                        params, resp.status, resp.headers.get("Location",""), body[:200])
+                    if resp.status in (200, 204):
+                        break
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: profiles/select failed: %s", exc)
 
