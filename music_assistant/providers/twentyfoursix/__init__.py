@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, AsyncGenerator
 
 import aiohttp
 
-from music_assistant_models.config_entries import ConfigEntry, ProviderConfig
+from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, ProviderConfig
 from music_assistant_models.enums import (
+    ConfigEntryType,
     ContentType,
     ImageType,
     MediaType,
@@ -23,6 +24,7 @@ from music_assistant_models.media_items import (
     Album,
     Artist,
     AudioFormat,
+    BrowseFolder,
     ItemMapping,
     MediaItemImage,
     ProviderMapping,
@@ -44,19 +46,10 @@ if TYPE_CHECKING:
 
 BASE_URL = "https://24six.app"
 API_BASE = f"{BASE_URL}/api"
-
-# Confirmed from DevTools:
-#   POST /app/content/{content_id}/begin
-#   Headers: X-XSRF-TOKEN, X-Requested-With, Cookie (24six_session + XSRF-TOKEN)
-#   Body (JSON ~71 bytes): {"device_id": "<uuid>", "content_type": "music"}
-#   Response: { content_id, stream_id, content_type,
-#               url: "https://stream.mux.com/<id>.m3u8?token=<jwt>" }
 BEGIN_ENDPOINT = f"{BASE_URL}/app/content"  # + /{content_id}/begin
-
-# Refresh Mux signed URL when < 5 min remain on the JWT
 TOKEN_REFRESH_BUFFER = 300
 
-SUPPORTED_FEATURES = (
+SUPPORTED_FEATURES = {
     ProviderFeature.SEARCH,
     ProviderFeature.BROWSE,
     ProviderFeature.LIBRARY_ARTISTS,
@@ -64,7 +57,7 @@ SUPPORTED_FEATURES = (
     ProviderFeature.LIBRARY_TRACKS,
     ProviderFeature.ARTIST_ALBUMS,
     ProviderFeature.ARTIST_TOPTRACKS,
-)
+}
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +77,25 @@ async def get_config_entries(
     mass: MusicAssistant,
     instance_id: str | None = None,
     action: str | None = None,
-    values: dict[str, ConfigEntry] | None = None,
+    values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
     """Return config entries for this provider."""
-    return ()
+    return (
+        ConfigEntry(
+            key=CONF_USERNAME,
+            type=ConfigEntryType.STRING,
+            label="Email / Username",
+            required=True,
+            description="Your 24Six account email address",
+        ),
+        ConfigEntry(
+            key=CONF_PASSWORD,
+            type=ConfigEntryType.SECURE_STRING,
+            label="Password",
+            required=True,
+            description="Your 24Six account password",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +107,6 @@ class TwentyFourSixProvider(MusicProvider):
 
     _session: aiohttp.ClientSession | None = None
     _device_id: str = ""
-    # { content_id: (mux_url, expiry_epoch) }
     _stream_url_cache: dict[str, tuple[str, int]] = {}
 
     # ------------------------------------------------------------------
@@ -107,7 +114,7 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     @property
-    def supported_features(self) -> tuple[ProviderFeature, ...]:
+    def supported_features(self) -> set[ProviderFeature]:
         return SUPPORTED_FEATURES
 
     async def handle_async_init(self) -> None:
@@ -141,7 +148,6 @@ class TwentyFourSixProvider(MusicProvider):
         return self._session
 
     def _xsrf_header(self, session: aiohttp.ClientSession) -> dict[str, str]:
-        """Build X-XSRF-TOKEN header from the session cookie jar."""
         for cookie in session.cookie_jar:
             if cookie.key == "XSRF-TOKEN":
                 return {"X-XSRF-TOKEN": urllib.parse.unquote(cookie.value)}
@@ -153,7 +159,6 @@ class TwentyFourSixProvider(MusicProvider):
         password: str = self.config.get_value(CONF_PASSWORD)
         session = await self._get_session()
 
-        # Step 1: GET login page to receive XSRF-TOKEN cookie
         try:
             async with session.get(
                 f"{BASE_URL}/login",
@@ -163,7 +168,6 @@ class TwentyFourSixProvider(MusicProvider):
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
 
-        # Step 2: POST credentials
         xsrf = self._xsrf_header(session)
         if not xsrf:
             self.logger.warning("24Six: XSRF-TOKEN cookie not found after GET /login")
@@ -219,6 +223,48 @@ class TwentyFourSixProvider(MusicProvider):
         except aiohttp.ClientError as exc:
             self.logger.error("24Six POST error %s: %s", url, exc)
             return {}
+
+    # ------------------------------------------------------------------
+    # Browse
+    # ------------------------------------------------------------------
+
+    async def browse(self, path: str) -> AsyncGenerator[Album | Artist | Track | BrowseFolder, None]:
+        """Browse the 24Six catalog."""
+        # path format: "twentyfoursix://artists", "twentyfoursix://albums", etc.
+        parts = path.split("/") if path else []
+        section = parts[-1] if parts else ""
+
+        if not section or section == self.instance_id:
+            # Root: show top-level folders
+            yield BrowseFolder(
+                item_id="artists",
+                provider=self.instance_id,
+                path=f"{self.instance_id}://artists",
+                name="Artists",
+            )
+            yield BrowseFolder(
+                item_id="albums",
+                provider=self.instance_id,
+                path=f"{self.instance_id}://albums",
+                name="Albums",
+            )
+            yield BrowseFolder(
+                item_id="tracks",
+                provider=self.instance_id,
+                path=f"{self.instance_id}://tracks",
+                name="Tracks",
+            )
+            return
+
+        if section == "artists":
+            async for artist in self.get_library_artists():
+                yield artist
+        elif section == "albums":
+            async for album in self.get_library_albums():
+                yield album
+        elif section == "tracks":
+            async for track in self.get_library_tracks():
+                yield track
 
     # ------------------------------------------------------------------
     # Search
@@ -321,38 +367,15 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def _begin_stream(self, content_id: str) -> str:
-        """
-        Call POST /app/content/{content_id}/begin to get a signed Mux HLS URL.
-
-        Confirmed from browser DevTools:
-          POST https://24six.app/app/content/{content_id}/begin
-          X-XSRF-TOKEN: <decoded XSRF-TOKEN cookie value>
-          X-Requested-With: XMLHttpRequest
-          Content-Type: application/json
-          Body: {"device_id": "<uuid>", "content_type": "music"}   (~71 bytes)
-
-          Response:
-          {
-            "content_id": 385629,
-            "stream_id":  "s14463c5ca9480",
-            "content_type": "music",
-            "url": "https://stream.mux.com/<playback_id>.m3u8?token=<jwt>"
-          }
-
-        The JWT 'exp' claim is parsed so we cache the URL and only call
-        /begin again when the token is close to expiry.
-        """
-        # Serve from cache if still valid
+        """Call POST /app/content/{content_id}/begin to get a signed Mux HLS URL."""
         cached = self._stream_url_cache.get(content_id)
         if cached:
             mux_url, expiry = cached
             if time.time() < expiry - TOKEN_REFRESH_BUFFER:
-                self.logger.debug("24Six: cached Mux URL for %s", content_id)
                 return mux_url
 
         url = f"{BEGIN_ENDPOINT}/{content_id}/begin"
         body = {"device_id": self._device_id, "content_type": "music"}
-
         self.logger.debug("24Six: POST /begin for content_id=%s", content_id)
         data = await self._api_post(url, body)
 
@@ -365,16 +388,10 @@ class TwentyFourSixProvider(MusicProvider):
 
         expiry = _parse_jwt_expiry(mux_url)
         self._stream_url_cache[content_id] = (mux_url, expiry)
-        self.logger.debug(
-            "24Six: Mux URL ready for content_id=%s (expires %s)", content_id, expiry
-        )
         return mux_url
 
     async def get_stream_details(self, item_id: str) -> StreamDetails:
-        """
-        Return stream details.  Calls /begin to get the signed Mux HLS URL.
-        MA passes this directly to ffmpeg which handles HLS segment fetching.
-        """
+        """Return HLS stream details for ffmpeg."""
         mux_url = await self._begin_stream(item_id)
         return StreamDetails(
             item_id=item_id,
@@ -501,10 +518,7 @@ class TwentyFourSixProvider(MusicProvider):
 # ---------------------------------------------------------------------------
 
 def _parse_jwt_expiry(mux_url: str) -> int:
-    """
-    Decode the 'exp' claim from the JWT token in a Mux signed URL.
-    Returns epoch int, or now+3600 on any parse failure.
-    """
+    """Decode the 'exp' claim from the JWT in a Mux signed URL."""
     try:
         qs = urllib.parse.urlparse(mux_url).query
         token = urllib.parse.parse_qs(qs).get("token", [None])[0]
