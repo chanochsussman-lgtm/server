@@ -532,11 +532,11 @@ class TwentyFourSixProvider(MusicProvider):
             if time.time() < expiry - TOKEN_REFRESH_BUFFER:
                 return stream_url
 
-        stream_url = (
-            f"https://24six.app/api/v3/content/{content_id}"
-            f"/play?format={audio_format}"
-        )
-        self.logger.info("24Six: constructed stream URL: %s", stream_url)
+stream_url = (
+    f"https://24six.app/api/v3/content/{content_id}"
+    f"/play?format={audio_format}&token={self._bearer_token}"
+)
+self.logger.info("24Six: constructed stream URL: https://24six.app/api/v3/content/%s/play?format=%s&token=<redacted>", content_id, audio_format)
 
         expiry = int(time.time()) + 6 * 3600
         self._stream_url_cache[content_id] = (stream_url, expiry)
