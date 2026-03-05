@@ -241,6 +241,7 @@ class TwentyFourSixProvider(MusicProvider):
 
             self.logger.info("24Six: selecting profile '%s' via %s", profile_name, url)
             xsrf = self._xsrf_header(session)
+            xsrf["Referer"] = f"{BASE_URL}/app/music"
             async with session.post(url, headers=xsrf) as resp:
                 body = await resp.text()
                 self.logger.info("24Six: profile selection status=%s body=%s", resp.status, body[:200])
