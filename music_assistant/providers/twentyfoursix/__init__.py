@@ -144,10 +144,11 @@ class TwentyFourSixProvider(MusicProvider):
                     "Origin": BASE_URL,
                 }
             )
-            # Seed a device_id cookie — the server uses this to identify the client
+            # Seed the device_id cookie from the registered browser session
+            import yarl as _yarl
             self._session.cookie_jar.update_cookies(
-                {"device_id": "music-assistant-24six"},
-                aiohttp.client_reqrep.URL(BASE_URL),
+                {"device_id": "eyJpdiI6IlIvY3IzNWFLRHhkUWJtalZOWTk3SGc9PSIsInZhbHVlIjoiMFpsc2tXU3Y5MHJPUzk5YmRBYVJsby9KZmxlM3VDUGFxOWJHeDVBWmNLdHpUemRSOTdyTzRLRVllSEVRUjN6aWt2aU50clRPUlRCbHZ3dnBHK1lMKzJISzlBSTVzNDV4d3BMaU9KdFBSUmc9IiwibWFjIjoiYWYyYTU1ZTE0YmQ3NzQ1NTM4OWM5M2VlMTA4M2E2MmU1ZmVmN2IyNGJiY2M3OWYyZTVhODU0ZjEyNmZhMmU0OCIsInRhZyI6IiJ9"},
+                _yarl.URL(BASE_URL),
             )
         return self._session
 
@@ -230,7 +231,13 @@ class TwentyFourSixProvider(MusicProvider):
                         f"24Six login failed — HTTP {resp.status}. "
                         "Check your username and password."
                     )
-                self.logger.info("24Six: logged in as %s status=%s", username, resp.status)
+                # Log the session cookie set by login
+                for c in session.cookie_jar:
+                    if c.key == "24six_session":
+                        self.logger.info("24Six: logged in as %s status=%s session=%s", username, resp.status, c.value[:50])
+                        break
+                else:
+                    self.logger.info("24Six: logged in as %s status=%s (no session cookie)", username, resp.status)
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
@@ -256,9 +263,12 @@ class TwentyFourSixProvider(MusicProvider):
                         resp2.raise_for_status()
                         return await resp2.json(content_type=None)
                 body = await resp.text()
-                self.logger.info("24Six: GET %s status=%s body=%s", url.replace("https://24six.app",""), resp.status, body[:400])
+                self.logger.info("24Six: GET %s status=%s body=%s", url.replace("https://24six.app",""), resp.status, body[:600])
                 import json as _json
-                return _json.loads(body)
+                try:
+                    return _json.loads(body)
+                except Exception:
+                    return {}
         except aiohttp.ClientError as exc:
             self.logger.error("24Six GET error %s: %s", url, exc)
             return {}
