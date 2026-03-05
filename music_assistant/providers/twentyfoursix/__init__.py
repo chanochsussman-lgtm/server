@@ -650,7 +650,7 @@ class TwentyFourSixProvider(MusicProvider):
         return StreamDetails(
             item_id=item_id,
             provider=self.instance_id,
-            audio_format=AudioFormat(content_type=content_type),
+            audio_format=AudioFormat(content_type=content_type, sample_rate=44100, bit_depth=16, channels=2),
             stream_type=stream_type,
             path=stream_url,
         )
