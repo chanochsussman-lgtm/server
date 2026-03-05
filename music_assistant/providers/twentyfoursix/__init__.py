@@ -183,7 +183,20 @@ class TwentyFourSixProvider(MusicProvider):
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
 
-        # Step 2: POST /login with credentials
+        # Step 2: POST /profiles/pin-check BEFORE login (browser order)
+        xsrf = self._xsrf_header(session)
+        try:
+            async with session.post(
+                f"{BASE_URL}/profiles/pin-check",
+                json={"profile_id": 89214},
+                headers=xsrf,
+            ) as resp:
+                body = await resp.text()
+                self.logger.info("24Six: pin-check status=%s body=%s", resp.status, body[:200])
+        except aiohttp.ClientError as exc:
+            self.logger.warning("24Six: pin-check failed: %s", exc)
+
+        # Step 3: POST /login with credentials
         xsrf = self._xsrf_header(session)
         try:
             async with session.post(
@@ -202,39 +215,20 @@ class TwentyFourSixProvider(MusicProvider):
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
 
-        # Step 3: POST /profiles/pin-check after login to select profile
+
+    async def _select_profile(self) -> None:
+        """POST /app/profile with empty body to finalize profile selection (browser flow)."""
+        session = await self._get_session()
         xsrf = self._xsrf_header(session)
         try:
             async with session.post(
-                f"{BASE_URL}/profiles/pin-check",
-                json={"profile_id": 89214},
+                f"{BASE_URL}/app/profile",
                 headers=xsrf,
             ) as resp:
                 body = await resp.text()
-                self.logger.info("24Six: pin-check status=%s body=%s", resp.status, body[:200])
+                self.logger.info("24Six: profile status=%s body=%s", resp.status, body[:300])
         except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: pin-check failed: %s", exc)
-
-
-    async def _select_profile(self) -> None:
-        """GET /profiles/select to finalize profile selection after pin-check."""
-        session = await self._get_session()
-        try:
-            # Try with profile_id param, then without
-            for params in [{"profile_id": 89214}, {"id": 89214}, None]:
-                async with session.get(
-                    f"{BASE_URL}/profiles/select",
-                    params=params,
-                    headers={"Accept": "text/html,application/xhtml+xml"},
-                    allow_redirects=False,
-                ) as resp:
-                    body = await resp.text()
-                    self.logger.info("24Six: profiles/select params=%s status=%s location=%s body=%s",
-                        params, resp.status, resp.headers.get("Location",""), body[:200])
-                    if resp.status in (200, 204):
-                        break
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: profiles/select failed: %s", exc)
+            self.logger.warning("24Six: profile selection failed: %s", exc)
 
     async def _api_get(self, url: str, params: dict | None = None) -> dict:
         """Authenticated GET, auto-retry once on 401."""
