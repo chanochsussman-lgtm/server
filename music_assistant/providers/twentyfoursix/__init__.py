@@ -229,13 +229,13 @@ class TwentyFourSixProvider(MusicProvider):
             if not chosen:
                 chosen = profiles[0]
 
-            # Use permission_id for the POST endpoint
-            permission_id = chosen.get("permission_id")
+            # Main account uses "id"; child profiles use "permission_id"
+            profile_id = chosen.get("permission_id") or chosen.get("id")
             profile_name = chosen.get("name", "unknown")
-            self.logger.info("24Six: selecting profile '%s' (permission_id=%s)", profile_name, permission_id)
+            self.logger.info("24Six: selecting profile '%s' (profile_id=%s)", profile_name, profile_id)
             xsrf = self._xsrf_header(session)
             async with session.post(
-                f"{BASE_URL}/app/profile/{permission_id}",
+                f"{BASE_URL}/app/profile/{profile_id}",
                 headers=xsrf,
             ) as resp:
                 body = await resp.text()
