@@ -224,15 +224,23 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.warning("24Six: GET %s failed: %s", url, exc)
             return {}
 
-    # Dashboard tile sections mirroring the 24Six app homepage
+    # Dashboard section keys from GET /api/v3/music response
     DASHBOARD_SECTIONS = [
-        ("trending_now",           "Trending Now 🔥"),
-        ("new_releases",           "New Releases"),
-        ("featured_for_you",       "Featured For You"),
-        ("featured_new_releases",  "Featured New Releases"),
-        ("top_artists",            "Top Artists"),
-        ("featured_br_new_releases", "Brand New Releases"),
+        ("trending",     "Trending Now 🔥"),
+        ("releases",     "New Releases"),
+        ("featured",     "Featured"),
+        ("newAlbums",    "New Albums"),
+        ("newSingles",   "New Singles"),
+        ("newArtists",   "New Artists"),
+        ("artists",      "Top Artists"),
+        ("playlists",    "Playlists"),
+        ("by24Six",      "By 24Six"),
+        ("recent",       "Recently Added"),
+        ("femaleArtists","Female Artists"),
+        ("categories",   "Browse Categories"),
     ]
+
+    _dashboard_cache: dict = {}  # cached dashboard response
 
     async def browse(self, path: str) -> list[BrowseFolder | Album | Artist]:
         """Browse 24Six mirroring the app homepage structure."""
@@ -241,121 +249,94 @@ class TwentyFourSixProvider(MusicProvider):
 
         # Root: show section folders mirroring app dashboard
         if not sub:
-            # Also fetch the main dashboard to get any extra sections
             raw = await self._api_get(f"{BASE_URL}/api/v3/music")
-            self.logger.info("24Six: dashboard keys=%s snippet=%s",
-                list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
-                str(raw)[:800])
+            self._dashboard_cache = raw  # cache for section drill-downs
+            self.logger.info("24Six: dashboard keys=%s", list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__)
 
             items: list[BrowseFolder] = []
-
-            # Fixed sections from app
             for tile_type, label in self.DASHBOARD_SECTIONS:
+                val = raw.get(tile_type) if isinstance(raw, dict) else None
+                if val is None or (isinstance(val, list) and len(val) == 0):
+                    continue  # skip empty sections
+                # Use first item image as section thumbnail
+                first_img = None
+                if isinstance(val, list) and val:
+                    first = val[0]
+                    first_img = self._img_url(first.get("img") or first.get("image"))
                 folder = BrowseFolder(
                     item_id=f"section_{tile_type}",
                     provider=self.instance_id,
                     path=f"{self.instance_id}://section/{tile_type}",
                     name=label,
                 )
+                if first_img:
+                    folder.metadata.images = [MediaItemImage(type=ImageType.THUMB, path=first_img, provider=self.instance_id)]
                 items.append(folder)
 
-            # Dynamic sections from API response
-            if isinstance(raw, dict):
-                for key, val in raw.items():
-                    if isinstance(val, list) and val and key not in ("errors",):
-                        # Skip keys already covered
-                        already = {t for t, _ in self.DASHBOARD_SECTIONS}
-                        if key not in already and key not in ("data", "message"):
-                            folder = BrowseFolder(
-                                item_id=f"section_{key}",
-                                provider=self.instance_id,
-                                path=f"{self.instance_id}://section/{key}",
-                                name=key.replace("_", " ").title(),
-                            )
-                            items.append(folder)
-
-            # Also add Library and Categories folders
+            # Add library
             items.append(BrowseFolder(
                 item_id="section_library",
                 provider=self.instance_id,
                 path=f"{self.instance_id}://section/library",
                 name="My Library ♪",
             ))
-            items.append(BrowseFolder(
-                item_id="section_category",
-                provider=self.instance_id,
-                path=f"{self.instance_id}://section/category",
-                name="Browse Categories",
-            ))
-
             return items
 
-        # Section drill-down: fetch /api/v3/music/{tile_type}
+        # Section drill-down: use cached dashboard data
         if sub.startswith("section/"):
             tile_type = sub.split("/", 1)[1]
 
             if tile_type == "library":
                 raw = await self._api_get(f"{BASE_URL}/api/v3/music/library")
-            elif tile_type == "category":
-                raw = await self._api_get(f"{BASE_URL}/api/v3/music/category")
+                data = raw if isinstance(raw, list) else raw.get("data") or raw.get("items") or []
+            elif tile_type == "categories":
+                # categories section contains category objects
+                data = self._dashboard_cache.get("categories") or []
+                if not data:
+                    raw = await self._api_get(f"{BASE_URL}/api/v3/music/category")
+                    data = raw if isinstance(raw, list) else raw.get("data") or []
             else:
-                raw = await self._api_get(f"{BASE_URL}/api/v3/music/{tile_type}")
+                # Use cached dashboard data - all sections are in the main response
+                data = self._dashboard_cache.get(tile_type)
+                if data is None:
+                    # Refresh dashboard cache
+                    raw = await self._api_get(f"{BASE_URL}/api/v3/music")
+                    self._dashboard_cache = raw
+                    data = raw.get(tile_type) or []
 
-            self.logger.info("24Six: section/%s keys=%s snippet=%s",
-                tile_type,
-                list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
-                str(raw)[:800])
+            self.logger.info("24Six: section/%s count=%s first=%s", tile_type, len(data) if isinstance(data, list) else "?", str(data[0] if isinstance(data, list) and data else data)[:200])
 
             results: list = []
+            if not isinstance(data, list):
+                return results
 
-            # Unwrap possible containers
-            data = raw
-            if isinstance(raw, dict):
-                for wrap_key in ("data", "tiles", "results", "items", "content"):
-                    if isinstance(raw.get(wrap_key), list):
-                        data = raw[wrap_key]
-                        break
-
-            if isinstance(data, list):
-                for item in data:
-                    item_type = item.get("type", "")
-                    if item_type in ("collection", "album"):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type", "")
+                if item_type == "artist" or "collection_count" in item:
+                    results.append(self._parse_artist(item))
+                elif item_type in ("collection", "album") or "track_count" in item:
+                    results.append(self._parse_album(item))
+                elif item_type in ("content", "track", "song"):
+                    results.append(self._parse_track(item))
+                elif item_type == "category":
+                    folder = BrowseFolder(
+                        item_id=f"category_{item.get('id')}",
+                        provider=self.instance_id,
+                        path=f"{self.instance_id}://category/{item.get('id')}",
+                        name=item.get("title") or item.get("name") or str(item.get("id")),
+                    )
+                    img = self._img_url(item.get("img"))
+                    if img:
+                        folder.metadata.images = [MediaItemImage(type=ImageType.THUMB, path=img, provider=self.instance_id)]
+                    results.append(folder)
+                elif item_type == "playlist":
+                    results.append(self._parse_album(item))
+                else:
+                    # Guess from fields
+                    if "img" in item and "title" in item:
                         results.append(self._parse_album(item))
-                    elif item_type == "artist":
-                        results.append(self._parse_artist(item))
-                    elif item_type in ("content", "track", "song"):
-                        results.append(self._parse_track(item))
-                    elif item_type == "category":
-                        folder = BrowseFolder(
-                            item_id=f"category_{item.get('id')}",
-                            provider=self.instance_id,
-                            path=f"{self.instance_id}://section/category/{item.get('id')}",
-                            name=item.get("title") or item.get("name") or str(item.get("id")),
-                        )
-                        img = self._img_url(item.get("img") or item.get("image"))
-                        if img:
-                            folder.metadata.images = [MediaItemImage(type=ImageType.THUMB, path=img, provider=self.instance_id)]
-                        results.append(folder)
-                    else:
-                        # Try to guess from keys present
-                        if "collection_count" in item or "bio" in item:
-                            results.append(self._parse_artist(item))
-                        elif "track_count" in item or "tracks" in item:
-                            results.append(self._parse_album(item))
-                        else:
-                            results.append(self._parse_album(item))
-            elif isinstance(data, dict):
-                # Some sections return nested structure
-                for key in ("collections", "artists", "content", "songs", "albums", "playlists"):
-                    items_list = data.get(key, [])
-                    if isinstance(items_list, list):
-                        for item in items_list[:20]:
-                            if key in ("artists",):
-                                results.append(self._parse_artist(item))
-                            elif key in ("songs", "content"):
-                                results.append(self._parse_track(item))
-                            else:
-                                results.append(self._parse_album(item))
 
             return results
 
@@ -450,20 +431,27 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_artist(self, prov_artist_id: str) -> Artist:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
-        artist_data = data.get("props", {}).get("artist") or data
-        if not artist_data:
+        # v3: {"artist": {...}, "top_songs": [...], "collections": [...]}
+        artist_data = data.get("artist") or data
+        if not artist_data or not artist_data.get("id"):
             raise MediaNotFoundError(f"Artist {prov_artist_id} not found on 24Six")
         return self._parse_artist(artist_data)
 
     async def get_artist_albums(self, prov_artist_id: str) -> list[Album]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
-        tiles = data.get("props", {}).get("collections", {}).get("tiles", [])
-        return [self._parse_album(c) for c in tiles]
+        # v3: collections is a list directly
+        collections = data.get("collections") or []
+        if isinstance(collections, dict):
+            collections = collections.get("tiles") or collections.get("data") or []
+        return [self._parse_album(c) for c in collections if isinstance(c, dict)]
 
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/artist/{prov_artist_id}")
-        tiles = data.get("props", {}).get("content", {}).get("tiles", [])
-        return [self._parse_track(t) for t in tiles]
+        # v3: top_songs is a list directly
+        tracks = data.get("top_songs") or data.get("content") or []
+        if isinstance(tracks, dict):
+            tracks = tracks.get("tiles") or tracks.get("data") or []
+        return [self._parse_track(t) for t in tracks if isinstance(t, dict)]
 
     # ------------------------------------------------------------------
     # Albums
@@ -475,16 +463,19 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_album(self, prov_album_id: str) -> Album:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
-        album_data = data.get("props", {}).get("collection") or data
-        if not album_data:
+        # v3: {"collection": {...}, "content": [...]}
+        album_data = data.get("collection") or data
+        if not album_data or not album_data.get("id"):
             raise MediaNotFoundError(f"Album {prov_album_id} not found on 24Six")
         return self._parse_album(album_data)
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
-        props = data.get("props", {})
-        tiles = props.get("content", {}).get("tiles", []) or props.get("tracks", [])
-        return [self._parse_track(t) for t in tiles]
+        # v3: content is list directly or wrapped
+        tracks = data.get("content") or data.get("tracks") or []
+        if isinstance(tracks, dict):
+            tracks = tracks.get("tiles") or tracks.get("data") or []
+        return [self._parse_track(t) for t in tracks if isinstance(t, dict)]
 
     # ------------------------------------------------------------------
     # Tracks
@@ -496,8 +487,9 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_track(self, prov_track_id: str) -> Track:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/content/{prov_track_id}")
-        track_data = data.get("props", {}).get("content") or data
-        if not track_data:
+        # v3: {"content": {...}} or direct
+        track_data = data.get("content") or data
+        if not track_data or not track_data.get("id"):
             raise MediaNotFoundError(f"Track {prov_track_id} not found on 24Six")
         return self._parse_track(track_data)
 
@@ -506,23 +498,47 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def _begin_stream(self, content_id: str) -> str:
-        """Call POST /app/content/{content_id}/begin to get a signed Mux HLS URL."""
+        """Get signed HLS stream URL for a content_id via the v3 API."""
         cached = self._stream_url_cache.get(content_id)
         if cached:
             mux_url, expiry = cached
             if time.time() < expiry - TOKEN_REFRESH_BUFFER:
                 return mux_url
 
+        # Try old /app/content/{id}/begin endpoint first (may still work)
         url = f"{BEGIN_ENDPOINT}/{content_id}/begin"
         body = {"device_id": self._device_id, "interaction": True}
         self.logger.debug("24Six: POST /begin for content_id=%s", content_id)
         data = await self._api_post(url, body)
+        self.logger.info("24Six: /begin response keys=%s snippet=%s",
+            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            str(data)[:400])
 
-        mux_url = data.get("url")
+        # Try multiple possible URL field names
+        mux_url = (
+            data.get("url") or data.get("stream_url") or data.get("hls_url") or
+            data.get("audio_url") or data.get("signed_url") or data.get("playback_url") or
+            (data.get("data") or {}).get("url") or (data.get("content") or {}).get("url")
+        )
+
+        if not mux_url:
+            # Fall back to fetching the content detail for a stream URL
+            self.logger.info("24Six: /begin gave no URL, trying content detail for id=%s", content_id)
+            detail = await self._api_get(f"{BASE_URL}/api/v3/music/content/{content_id}")
+            self.logger.info("24Six: content detail keys=%s snippet=%s",
+                list(detail.keys()) if isinstance(detail, dict) else type(detail).__name__,
+                str(detail)[:600])
+            content_data = detail.get("content") or detail
+            mux_url = (
+                content_data.get("url") or content_data.get("stream_url") or
+                content_data.get("hls_url") or content_data.get("audio_url") or
+                content_data.get("signed_url") or content_data.get("file_url")
+            )
+
         if not mux_url:
             raise MediaNotFoundError(
-                f"24Six: /begin returned no URL for content_id={content_id}. "
-                f"Full response: {data}"
+                f"24Six: no stream URL found for content_id={content_id}. "
+                f"Response: {str(data)[:200]}"
             )
 
         expiry = _parse_jwt_expiry(mux_url)
@@ -550,7 +566,7 @@ class TwentyFourSixProvider(MusicProvider):
         return raw_url.split("?")[0]
 
     def _parse_artist(self, data: dict) -> Artist:
-        artist_id = str(data.get("id", ""))
+        artist_id = str(data.get("id") or data.get("artist_id") or "")
         artist = Artist(
             item_id=artist_id,
             provider=self.instance_id,
@@ -574,7 +590,7 @@ class TwentyFourSixProvider(MusicProvider):
         return artist
 
     def _parse_album(self, data: dict) -> Album:
-        album_id = str(data.get("id", ""))
+        album_id = str(data.get("id") or data.get("collection_id") or "")
         album = Album(
             item_id=album_id,
             provider=self.instance_id,
@@ -609,8 +625,12 @@ class TwentyFourSixProvider(MusicProvider):
         return album
 
     def _parse_track(self, data: dict) -> Track:
-        track_id = str(data.get("id", ""))
+        track_id = str(data.get("id") or data.get("content_id") or "")
         collection = data.get("collection") or {}
+        # Build artists list - top_songs has artist_id + subtitle instead of artists array
+        raw_artists = data.get("artists") or []
+        if not raw_artists and data.get("artist_id"):
+            raw_artists = [{"id": data["artist_id"], "name": data.get("subtitle", "").split(",")[0].strip() or "Unknown"}]
         track = Track(
             item_id=track_id,
             provider=self.instance_id,
@@ -621,15 +641,15 @@ class TwentyFourSixProvider(MusicProvider):
                     provider=self.instance_id,
                     name=a.get("name", ""),
                 )
-                for a in data.get("artists", [])
+                for a in raw_artists if a.get("id")
             ],
             album=(
                 ItemMapping(
-                    item_id=str(collection["id"]),
+                    item_id=str(collection.get("id") or data.get("collection_id", "")),
                     provider=self.instance_id,
                     name=collection.get("title", ""),
                 )
-                if collection.get("id")
+                if (collection.get("id") or data.get("collection_id"))
                 else None
             ),
             duration=data.get("length", 0),
