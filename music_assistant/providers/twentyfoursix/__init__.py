@@ -268,9 +268,8 @@ class TwentyFourSixProvider(MusicProvider):
                     provider=self.instance_id,
                     path=f"{self.instance_id}://section/{tile_type}",
                     name=label,
+                    label=first_img or "",
                 )
-                if first_img:
-                    folder.metadata.images = [MediaItemImage(type=ImageType.THUMB, path=first_img, provider=self.instance_id)]
                 items.append(folder)
 
             # Add library
@@ -327,9 +326,6 @@ class TwentyFourSixProvider(MusicProvider):
                         path=f"{self.instance_id}://category/{item.get('id')}",
                         name=item.get("title") or item.get("name") or str(item.get("id")),
                     )
-                    img = self._img_url(item.get("img"))
-                    if img:
-                        folder.metadata.images = [MediaItemImage(type=ImageType.THUMB, path=img, provider=self.instance_id)]
                     results.append(folder)
                 elif item_type == "playlist":
                     results.append(self._parse_album(item))
@@ -486,8 +482,20 @@ class TwentyFourSixProvider(MusicProvider):
         yield  # make this an async generator
 
     async def get_track(self, prov_track_id: str) -> Track:
-        data = await self._api_get(f"{BASE_URL}/api/v3/music/content/{prov_track_id}")
-        # v3: {"content": {...}} or direct
+        # v3: content endpoint requires POST
+        import json as _jt
+        session = await self._get_session()
+        try:
+            async with session.post(
+                f"{BASE_URL}/api/v3/music/content/{prov_track_id}",
+                json={},
+                headers=self._auth_headers(),
+            ) as resp:
+                body = await resp.text()
+                self.logger.info("24Six: POST content/%s status=%s body=%s", prov_track_id, resp.status, body[:400])
+                data = _jt.loads(body) if body else {}
+        except Exception as exc:
+            raise MediaNotFoundError(f"Track {prov_track_id} fetch failed: {exc}") from exc
         track_data = data.get("content") or data
         if not track_data or not track_data.get("id"):
             raise MediaNotFoundError(f"Track {prov_track_id} not found on 24Six")
@@ -505,34 +513,42 @@ class TwentyFourSixProvider(MusicProvider):
             if time.time() < expiry - TOKEN_REFRESH_BUFFER:
                 return mux_url
 
-        # Try old /app/content/{id}/begin endpoint first (may still work)
-        url = f"{BEGIN_ENDPOINT}/{content_id}/begin"
-        body = {"device_id": self._device_id, "interaction": True}
-        self.logger.debug("24Six: POST /begin for content_id=%s", content_id)
-        data = await self._api_post(url, body)
-        self.logger.info("24Six: /begin response keys=%s snippet=%s",
-            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-            str(data)[:400])
+        import json as _js
+        session = await self._get_session()
 
-        # Try multiple possible URL field names
+        # Step 1: POST /api/v3/music/content/{id} to get full content detail with stream URL
+        data = {}
+        try:
+            async with session.post(
+                f"{BASE_URL}/api/v3/music/content/{content_id}",
+                json={},
+                headers=self._auth_headers(),
+            ) as resp:
+                body = await resp.text()
+                self.logger.info("24Six: POST content/%s status=%s body=%s", content_id, resp.status, body[:1500])
+                data = _js.loads(body) if body else {}
+        except Exception as exc:
+            self.logger.warning("24Six: POST content/%s failed: %s", content_id, exc)
+
+        content_data = data.get("content") or data
         mux_url = (
-            data.get("url") or data.get("stream_url") or data.get("hls_url") or
-            data.get("audio_url") or data.get("signed_url") or data.get("playback_url") or
-            (data.get("data") or {}).get("url") or (data.get("content") or {}).get("url")
+            content_data.get("url") or content_data.get("stream_url") or
+            content_data.get("hls_url") or content_data.get("audio_url") or
+            content_data.get("signed_url") or content_data.get("file_url") or
+            content_data.get("playback_url")
         )
 
         if not mux_url:
-            # Fall back to fetching the content detail for a stream URL
-            self.logger.info("24Six: /begin gave no URL, trying content detail for id=%s", content_id)
-            detail = await self._api_get(f"{BASE_URL}/api/v3/music/content/{content_id}")
-            self.logger.info("24Six: content detail keys=%s snippet=%s",
-                list(detail.keys()) if isinstance(detail, dict) else type(detail).__name__,
-                str(detail)[:600])
-            content_data = detail.get("content") or detail
+            # Step 2: Try old /app/content/{id}/begin endpoint
+            url = f"{BEGIN_ENDPOINT}/{content_id}/begin"
+            begin_data = await self._api_post(url, {"device_id": self._device_id, "interaction": True})
+            self.logger.info("24Six: /begin response keys=%s snippet=%s",
+                list(begin_data.keys()) if isinstance(begin_data, dict) else type(begin_data).__name__,
+                str(begin_data)[:400])
             mux_url = (
-                content_data.get("url") or content_data.get("stream_url") or
-                content_data.get("hls_url") or content_data.get("audio_url") or
-                content_data.get("signed_url") or content_data.get("file_url")
+                begin_data.get("url") or begin_data.get("stream_url") or begin_data.get("hls_url") or
+                begin_data.get("audio_url") or begin_data.get("signed_url") or
+                (begin_data.get("data") or {}).get("url")
             )
 
         if not mux_url:
