@@ -50,9 +50,6 @@ TOKEN_REFRESH_BUFFER = 300
 
 SUPPORTED_FEATURES = {
     ProviderFeature.SEARCH,
-    ProviderFeature.LIBRARY_ARTISTS,
-    ProviderFeature.LIBRARY_ALBUMS,
-    ProviderFeature.LIBRARY_TRACKS,
     ProviderFeature.ARTIST_ALBUMS,
     ProviderFeature.ARTIST_TOPTRACKS,
 }
@@ -120,7 +117,7 @@ class TwentyFourSixProvider(MusicProvider):
         self._stream_url_cache = {}
         await self._login()
 
-    async def unload(self) -> None:
+    async def unload(self, *args, **kwargs) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -190,9 +187,9 @@ class TwentyFourSixProvider(MusicProvider):
         """Authenticated GET, auto-retry once on 401."""
         session = await self._get_session()
         # Inertia apps return JSON when X-Inertia header is present
+        # Do NOT send X-Inertia-Version — version mismatch causes a 409 redirect
         inertia_headers = {
             "X-Inertia": "true",
-            "X-Inertia-Version": "1",
         }
         try:
             async with session.get(url, params=params, headers=inertia_headers) as resp:
@@ -237,25 +234,61 @@ class TwentyFourSixProvider(MusicProvider):
         media_types: list[MediaType] | None = None,
         limit: int = 20,
     ) -> SearchResults:
-        """Search 24Six using the full Inertia search for rich results with artist/album metadata."""
-        data = await self._api_get(
-            f"{BASE_URL}/app/music/search",
-            params={"q": search_query},
+        """Search 24Six using the quick search POST endpoint."""
+        # POST /app/music/search/quick returns [{id, name, type, img}, ...]
+        raw = await self._api_post(
+            f"{BASE_URL}/app/music/search/quick",
+            {"q": search_query},
         )
-        props = data.get("props", {})
+        if not isinstance(raw, list):
+            self.logger.warning("24Six: quick search returned unexpected type %s", type(raw))
+            raw = []
+
         results = SearchResults()
+        for item in raw[:limit]:
+            item_type = item.get("type")
+            item_id = str(item.get("id", ""))
+            name = item.get("name") or "Unknown"
+            img = self._img_url(item.get("img"))
+            images = [MediaItemImage(type=ImageType.THUMB, path=img, provider=self.instance_id)] if img else []
 
-        if not media_types or MediaType.ARTIST in media_types:
-            for item in (props.get("artists") or {}).get("tiles", []):
-                results.artists.append(self._parse_artist(item))
+            if item_type == "artist" and (not media_types or MediaType.ARTIST in media_types):
+                artist = Artist(
+                    item_id=item_id,
+                    provider=self.instance_id,
+                    name=name,
+                    provider_mappings={ProviderMapping(item_id=item_id, provider_domain=self.domain, provider_instance=self.instance_id)},
+                )
+                if images:
+                    artist.metadata.images = images
+                results.artists.append(artist)
 
-        if not media_types or MediaType.ALBUM in media_types:
-            for item in (props.get("collections") or {}).get("tiles", []):
-                results.albums.append(self._parse_album(item))
+            elif item_type == "collection" and (not media_types or MediaType.ALBUM in media_types):
+                album = Album(
+                    item_id=item_id,
+                    provider=self.instance_id,
+                    name=name,
+                    provider_mappings={ProviderMapping(item_id=item_id, provider_domain=self.domain, provider_instance=self.instance_id)},
+                )
+                if images:
+                    album.metadata.images = images
+                results.albums.append(album)
 
-        if not media_types or MediaType.TRACK in media_types:
-            for item in (props.get("content") or {}).get("tiles", []):
-                results.tracks.append(self._parse_track(item))
+            elif item_type == "content" and (not media_types or MediaType.TRACK in media_types):
+                track = Track(
+                    item_id=item_id,
+                    provider=self.instance_id,
+                    name=name,
+                    provider_mappings={ProviderMapping(
+                        item_id=item_id,
+                        provider_domain=self.domain,
+                        provider_instance=self.instance_id,
+                        audio_format=AudioFormat(content_type=ContentType.HLS),
+                    )},
+                )
+                if images:
+                    track.metadata.images = images
+                results.tracks.append(track)
 
         return results
 
@@ -264,9 +297,8 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
-        data = await self._api_get(f"{BASE_URL}/app/music/search", params={"q": "a"})
-        for item in data.get("props", {}).get("artists", {}).get("tiles", []):
-            yield self._parse_artist(item)
+        return
+        yield  # make this an async generator
 
     async def get_artist(self, prov_artist_id: str) -> Artist:
         data = await self._api_get(f"{BASE_URL}/app/music/artist/{prov_artist_id}")
@@ -290,9 +322,8 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
-        data = await self._api_get(f"{BASE_URL}/app/music/search", params={"q": "a"})
-        for item in data.get("props", {}).get("collections", {}).get("tiles", []):
-            yield self._parse_album(item)
+        return
+        yield  # make this an async generator
 
     async def get_album(self, prov_album_id: str) -> Album:
         data = await self._api_get(f"{BASE_URL}/app/music/collection/{prov_album_id}")
@@ -312,9 +343,8 @@ class TwentyFourSixProvider(MusicProvider):
     # ------------------------------------------------------------------
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
-        data = await self._api_get(f"{BASE_URL}/app/music/search", params={"q": "a"})
-        for item in data.get("props", {}).get("content", {}).get("tiles", []):
-            yield self._parse_track(item)
+        return
+        yield  # make this an async generator
 
     async def get_track(self, prov_track_id: str) -> Track:
         data = await self._api_get(f"{BASE_URL}/app/music/content/{prov_track_id}")
