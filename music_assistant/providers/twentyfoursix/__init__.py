@@ -287,7 +287,6 @@ class TwentyFourSixProvider(MusicProvider):
                     provider=self.instance_id,
                     path=f"{self.instance_id}://section/{tile_type}",
                     name=label,
-                    label=first_img or "",
                 )
                 items.append(folder)
 
@@ -502,13 +501,22 @@ class TwentyFourSixProvider(MusicProvider):
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
         # v3: collection endpoint returns {"collection": {...}, "contents": [...]}
         # Note: "contents" not "content"!
-        tracks = (data.get("contents") or data.get("content") or 
+        collection_meta = data.get("collection") or {}
+        tracks = (data.get("contents") or data.get("content") or
                   data.get("tracks") or
-                  (data.get("collection") or {}).get("contents") or [])
+                  collection_meta.get("contents") or [])
         if isinstance(tracks, dict):
             tracks = tracks.get("tiles") or tracks.get("data") or []
         self.logger.error("24Six: album %s tracks count=%s", prov_album_id, len(tracks))
-        return [self._parse_track(t) for t in tracks if isinstance(t, dict)]
+        result = []
+        for t in tracks:
+            if not isinstance(t, dict):
+                continue
+            # Inject collection info so track always has album reference
+            if not t.get("collection") and collection_meta.get("id"):
+                t = {**t, "collection": collection_meta}
+            result.append(self._parse_track(t))
+        return result
 
     # ------------------------------------------------------------------
     # Tracks
@@ -519,7 +527,7 @@ class TwentyFourSixProvider(MusicProvider):
         yield  # make this an async generator
 
     async def get_track(self, prov_track_id: str) -> Track:
-        # v3: content endpoint requires POST
+        """Fetch single track metadata. POST /api/v3/music/content/{id} returns track directly."""
         import json as _jt
         session = await self._get_session()
         try:
@@ -529,11 +537,15 @@ class TwentyFourSixProvider(MusicProvider):
                 headers=self._auth_headers(),
             ) as resp:
                 body = await resp.text()
-                self.logger.info("24Six: POST content/%s status=%s body=%s", prov_track_id, resp.status, body[:400])
+                self.logger.error("24Six: GET_TRACK POST content/%s status=%s top_keys=%s",
+                    prov_track_id, resp.status,
+                    list(_jt.loads(body).keys()) if body and body[0]=='{' else body[:100])
                 data = _jt.loads(body) if body else {}
         except Exception as exc:
             raise MediaNotFoundError(f"Track {prov_track_id} fetch failed: {exc}") from exc
-        track_data = data.get("content") or data
+        # The POST returns the track directly at top level (id, title, artist_id, ...)
+        # NOT wrapped in a "content" key
+        track_data = data if data.get("id") else (data.get("content") or data)
         if not track_data or not track_data.get("id"):
             raise MediaNotFoundError(f"Track {prov_track_id} not found on 24Six")
         return self._parse_track(track_data)
@@ -554,10 +566,12 @@ class TwentyFourSixProvider(MusicProvider):
         session = await self._get_session()
         mux_url = None
 
-        # Attempt 1: GET /api/music/content/{id}/stream (original Mux discovery endpoint)
+        # Attempt 1: Try all known stream URL patterns
         for stream_url_candidate in [
-            f"{BASE_URL}/api/music/content/{content_id}/stream",
             f"{BASE_URL}/api/v3/music/content/{content_id}/stream",
+            f"{BASE_URL}/api/v3/music/stream/{content_id}",
+            f"{BASE_URL}/api/v3/music/content/{content_id}/play",
+            f"{BASE_URL}/api/music/content/{content_id}/stream",
             f"{BASE_URL}/stream/music/content/{content_id}",
         ]:
             try:
