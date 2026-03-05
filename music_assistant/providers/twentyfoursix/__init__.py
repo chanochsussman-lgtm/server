@@ -195,14 +195,15 @@ class TwentyFourSixProvider(MusicProvider):
                 headers=xsrf,
             ) as resp:
                 data = await resp.json(content_type=None)
-                profiles = data if isinstance(data, list) else data.get("profiles", [])
+                self.logger.info("24Six: check-existing-user status=%s data=%s", resp.status, str(data)[:300])
+                profiles = data if isinstance(data, list) else (data.get("profiles") or data.get("data") or [])
                 for p in (profiles or []):
                     if "chanoch" in (p.get("name") or "").strip().lower():
                         profile_id = p.get("permission_id") or p.get("id")
                         break
                 if not profile_id and profiles:
                     profile_id = profiles[0].get("permission_id") or profiles[0].get("id")
-                self.logger.info("24Six: check-existing-user status=%s profile_id=%s", resp.status, profile_id)
+                self.logger.info("24Six: check-existing-user profile_id=%s", profile_id)
         except aiohttp.ClientError as exc:
             self.logger.warning("24Six: check-existing-user failed: %s", exc)
 
