@@ -229,15 +229,19 @@ class TwentyFourSixProvider(MusicProvider):
             if not chosen:
                 chosen = profiles[0]
 
-            # Main account uses "id"; child profiles use "permission_id"
-            profile_id = chosen.get("permission_id") or chosen.get("id")
             profile_name = chosen.get("name", "unknown")
-            self.logger.info("24Six: selecting profile '%s' (profile_id=%s)", profile_name, profile_id)
+            permission_id = chosen.get("permission_id")
+
+            # POST /app/profile with no body selects the main account.
+            # Child profiles use POST /app/profile/{permission_id}.
+            if permission_id:
+                url = f"{BASE_URL}/app/profile/{permission_id}"
+            else:
+                url = f"{BASE_URL}/app/profile"
+
+            self.logger.info("24Six: selecting profile '%s' via %s", profile_name, url)
             xsrf = self._xsrf_header(session)
-            async with session.post(
-                f"{BASE_URL}/app/profile/{profile_id}",
-                headers=xsrf,
-            ) as resp:
+            async with session.post(url, headers=xsrf) as resp:
                 body = await resp.text()
                 self.logger.info("24Six: profile selection status=%s body=%s", resp.status, body[:200])
         except aiohttp.ClientError as exc:
