@@ -499,15 +499,17 @@ class TwentyFourSixProvider(MusicProvider):
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         data = await self._api_get(f"{BASE_URL}/api/v3/music/collection/{prov_album_id}")
-        # v3: collection endpoint returns {"collection": {...}, "contents": [...]}
-        # Note: "contents" not "content"!
+        # API returns {"collection": {"id":..., "contents": [...], ...}}
+        # Tracks are inside collection.contents - check there first, then fall back to root
         collection_meta = data.get("collection") or {}
-        tracks = (data.get("contents") or data.get("content") or
-                  data.get("tracks") or
-                  collection_meta.get("contents") or [])
+        tracks = (collection_meta.get("contents") or
+                  collection_meta.get("content") or
+                  data.get("contents") or
+                  data.get("content") or
+                  data.get("tracks") or [])
         if isinstance(tracks, dict):
             tracks = tracks.get("tiles") or tracks.get("data") or []
-        self.logger.error("24Six: album %s tracks count=%s", prov_album_id, len(tracks))
+        self.logger.info("24Six: album %s tracks count=%s", prov_album_id, len(tracks))
         result = []
         for t in tracks:
             if not isinstance(t, dict):
@@ -637,8 +639,10 @@ class TwentyFourSixProvider(MusicProvider):
             stream_type = StreamType.HLS
         elif audio_fmt == "ogg":
             content_type = ContentType.OGG
+        elif audio_fmt == "m4a":
+            content_type = ContentType.M4A
         else:
-            content_type = ContentType.AAC  # m4a / aac
+            content_type = ContentType.AAC
 
         stream_url = await self._begin_stream(item_id, audio_fmt)
         self.logger.info("24Six: streaming %s fmt=%s url=%s", item_id, audio_fmt, stream_url)
@@ -726,7 +730,15 @@ class TwentyFourSixProvider(MusicProvider):
         # Build artists list - top_songs has artist_id + subtitle instead of artists array
         raw_artists = data.get("artists") or []
         if not raw_artists and data.get("artist_id"):
-            raw_artists = [{"id": data["artist_id"], "name": data.get("subtitle", "").split(",")[0].strip() or "Unknown"}]
+            # Try to get artist name from collection artists, subtitle, or collection itself
+            coll_artists = collection.get("artists") or []
+            artist_name = (
+                next((a.get("name") for a in coll_artists if a.get("id") == data.get("artist_id")), None)
+                or data.get("artist_name")
+                or (data.get("subtitle") or "").split("•")[0].strip()
+                or "Unknown"
+            )
+            raw_artists = [{"id": data["artist_id"], "name": artist_name}]
         track = Track(
             item_id=track_id,
             provider=self.instance_id,
@@ -755,7 +767,7 @@ class TwentyFourSixProvider(MusicProvider):
                     item_id=track_id,
                     provider_domain=self.domain,
                     provider_instance=self.instance_id,
-                    audio_format=AudioFormat(content_type=ContentType.AAC),
+                    audio_format=AudioFormat(content_type=ContentType.M4A),
                 )
             },
         )
