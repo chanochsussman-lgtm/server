@@ -224,6 +224,25 @@ class TwentyFourSixProvider(MusicProvider):
             self.logger.warning("24Six: GET %s failed: %s", url, exc)
             return {}
 
+    async def _api_post(self, url: str, body: dict | None = None) -> dict:
+        """Authenticated POST against REST API v3."""
+        import json as _jsonp
+        session = await self._get_session()
+        try:
+            async with session.post(url, json=body or {}, headers=self._auth_headers()) as resp:
+                if resp.status == 401:
+                    self.logger.warning("24Six: 401 on POST %s — re-logging in", url)
+                    await self._login()
+                    async with session.post(url, json=body or {}, headers=self._auth_headers()) as resp2:
+                        rb = await resp2.text()
+                        return _jsonp.loads(rb) if rb else {}
+                rb = await resp.text()
+                self.logger.info("24Six: POST %s status=%s body=%s", url.replace(BASE_URL,""), resp.status, rb[:400])
+                return _jsonp.loads(rb) if rb else {}
+        except aiohttp.ClientError as exc:
+            self.logger.warning("24Six: POST %s failed: %s", url, exc)
+            return {}
+
     # Dashboard section keys from GET /api/v3/music response
     DASHBOARD_SECTIONS = [
         ("trending",     "Trending Now 🔥"),
@@ -525,8 +544,14 @@ class TwentyFourSixProvider(MusicProvider):
                 headers=self._auth_headers(),
             ) as resp:
                 body = await resp.text()
-                self.logger.info("24Six: POST content/%s status=%s body=%s", content_id, resp.status, body[:3000])
                 data = _js.loads(body) if body else {}
+                self.logger.info("24Six: POST content/%s status=%s keys=%s url_fields=%s", 
+                    content_id, resp.status, 
+                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                    {k: str(v)[:80] for k, v in (data if isinstance(data, dict) else {}).items() 
+                     if k in ("url","stream_url","hls_url","audio_url","signed_url","file_url",
+                               "playback_url","media_url","token","stream","play_url","src","source",
+                               "streaming_url","audio","download_url","cdn_url","signed","hls","m3u8")})
         except Exception as exc:
             self.logger.warning("24Six: POST content/%s failed: %s", content_id, exc)
 
