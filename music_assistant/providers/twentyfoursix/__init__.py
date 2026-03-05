@@ -188,12 +188,25 @@ class TwentyFourSixProvider(MusicProvider):
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six: unable to reach login page: {exc}") from exc
 
-        # Step 2: POST /login with credentials
+        # Step 2: POST /profiles/pin-check (select profile before login)
+        xsrf = self._xsrf_header(session)
+        try:
+            async with session.post(
+                f"{BASE_URL}/profiles/pin-check",
+                json={"profile_id": 89214},
+                headers=xsrf,
+            ) as resp:
+                body = await resp.text()
+                self.logger.info("24Six: pin-check status=%s body=%s", resp.status, body[:100])
+        except aiohttp.ClientError as exc:
+            self.logger.warning("24Six: pin-check failed: %s", exc)
+
+        # Step 3: POST /login with credentials AND profile embedded
         xsrf = self._xsrf_header(session)
         try:
             async with session.post(
                 f"{BASE_URL}/login",
-                json={"email": username, "password": password},
+                json={"email": username, "password": password, "profile": 89214, "pin": None},
                 headers=xsrf,
                 allow_redirects=True,
             ) as resp:
@@ -205,23 +218,6 @@ class TwentyFourSixProvider(MusicProvider):
                 self.logger.info("24Six: logged in as %s status=%s", username, resp.status)
         except aiohttp.ClientError as exc:
             raise LoginFailed(f"24Six login request failed: {exc}") from exc
-
-        # Step 3: POST /profiles/pin-check after login (requires authenticated session)
-        xsrf = self._xsrf_header(session)
-        try:
-            async with session.post(
-                f"{BASE_URL}/profiles/pin-check",
-                json={"profile_id": 89214},
-                headers=xsrf,
-            ) as resp:
-                body = await resp.text()
-                self.logger.info("24Six: pin-check status=%s body=%s", resp.status, body[:200])
-                # Log session cookie value after pin-check
-                for c in session.cookie_jar:
-                    if c.key == "24six_session":
-                        self.logger.info("24Six: 24six_session after pin-check = %s", c.value[:40])
-        except aiohttp.ClientError as exc:
-            self.logger.warning("24Six: pin-check failed: %s", exc)
 
 
     async def _select_profile(self) -> None:
